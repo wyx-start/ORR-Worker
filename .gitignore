@@ -1,0 +1,11 @@
+__pycache__/
+.runtime/
+.pytest_cache/
+*.orrproj
+verification/
+user_settings/
+.venv/
+.release/
+.env
+.env.*
+.DS_Store

@@ -1,0 +1,100 @@
+// Local-only browser smoke test; uses the Codex bundled browser runtime.
+const { chromium } = require('./browser_runtime.cjs');
+const fs = require('fs');
+const path = require('path');
+const assert = require('assert');
+
+(async () => {
+  const root = path.resolve(__dirname, '..');
+  const output = path.join(root, 'verification');
+  fs.mkdirSync(output, {recursive:true});
+  const state = JSON.parse(fs.readFileSync(path.join(root,'.runtime','server.json'),'utf8'));
+  const chrome = chromium.executablePath();
+  const installedBrowser = fs.existsSync(chrome) ? {executablePath:chrome} : {channel:'msedge'};
+  const browser = await chromium.launch({...installedBrowser, headless:true, args:['--proxy-server=direct://','--proxy-bypass-list=*']});
+  const page = await browser.newPage({viewport:{width:1440,height:1000}});
+  const failures = [];
+  page.on('pageerror', e => failures.push(e.message));
+  try {
+    await page.goto(process.env.ORR_TEST_URL || state.url, {waitUntil:'domcontentloaded'});
+    await page.getByRole('heading',{name:'导入与设置',exact:true}).waitFor({timeout:30000});
+    await page.getByRole('button',{name:'载入四份示例',exact:true}).click();
+    await page.getByRole('heading',{name:'当前实验条件',exact:true}).waitFor();
+    await page.getByRole('button',{name:'确认并应用分组与背景',exact:true}).click();
+    await page.getByRole('heading',{name:'当前实验条件',exact:true}).waitFor();
+    await page.screenshot({path:path.join(output,'browser_import.png'),fullPage:true});
+    await page.getByText('扫描与背景',{exact:true}).click();
+    await page.getByRole('heading',{name:'扫描、通道与背景',exact:true}).waitFor();
+    await page.getByText('修改扫描、通道与背景',{exact:true}).click();
+    await page.getByRole('switch',{name:'人工选择扫描段',exact:true}).press('Space');
+    await page.locator('[data-testid="stImage"]').first().waitFor();
+    await page.screenshot({path:path.join(output,'browser_scan.png'),fullPage:true});
+    await page.getByRole('combobox',{name:'分析与导出的电位坐标'}).click();
+    await page.getByRole('option',{name:'原始',exact:true}).click();
+    await page.getByRole('link',{name:/极化曲线/}).click();
+    await page.getByRole('heading',{name:'极化曲线',exact:true}).waitFor();
+    await page.getByRole('button',{name:'PNG · 300 dpi',exact:true}).waitFor();
+    assert.equal(await page.getByRole('switch',{name:'启用曲线平滑',exact:true}).isChecked(),false);
+    await page.locator('[data-testid="stImage"]').first().screenshot({path:path.join(output,'browser_plot_unsmoothed.png')});
+    const unsmoothedDownload = page.waitForEvent('download');
+    await page.getByRole('button',{name:'单独导出曲线 CSV',exact:true}).click();
+    await (await unsmoothedDownload).saveAs(path.join(output,'browser_polarization_unsmoothed_data.csv'));
+    assert(!fs.readFileSync(path.join(output,'browser_polarization_unsmoothed_data.csv'),'utf8').includes('smoothed_plot_only'));
+    let oldImage = await page.locator('[data-testid="stImage"] img').first().getAttribute('src');
+    await page.getByRole('switch',{name:'启用曲线平滑',exact:true}).press('Space');
+    await page.getByText(/CSV 中 smoothed_plot_only 列对应图中的实线/).waitFor();
+    await page.waitForFunction(old => {
+      const image = document.querySelector('[data-testid="stImage"] img');
+      return image && image.complete && image.getAttribute('src')!==old;
+    }, oldImage);
+    await page.locator('[data-testid="stImage"]').first().screenshot({path:path.join(output,'browser_plot_smoothing_comparison.png')});
+    oldImage = await page.locator('[data-testid="stImage"] img').first().getAttribute('src');
+    await page.getByRole('combobox',{name:'平滑强度',exact:true}).click();
+    await page.getByRole('combobox',{name:'平滑强度',exact:true}).press('ArrowDown');
+    await page.getByRole('option',{name:/^中/}).click();
+    await page.waitForFunction(old => {
+      const image = document.querySelector('[data-testid="stImage"] img');
+      return image && image.complete && image.getAttribute('src')!==old;
+    }, oldImage);
+    oldImage = await page.locator('[data-testid="stImage"] img').first().getAttribute('src');
+    await page.getByRole('switch',{name:'显示浅色未平滑参考线',exact:true}).press('Space');
+    await page.waitForFunction(old => {
+      const image = document.querySelector('[data-testid="stImage"] img');
+      return image && image.complete && image.getAttribute('src')!==old;
+    }, oldImage);
+    await page.screenshot({path:path.join(output,'browser_curves.png'),fullPage:true});
+    await page.locator('[data-testid="stImage"]').first().screenshot({path:path.join(output,'browser_plot.png')});
+    const download = page.waitForEvent('download');
+    await page.getByRole('button',{name:'单独导出曲线 CSV',exact:true}).click();
+    const file = await download;
+    await file.saveAs(path.join(output,'browser_polarization_data.csv'));
+    assert(fs.statSync(path.join(output,'browser_polarization_data.csv')).size>1000);
+    assert(fs.readFileSync(path.join(output,'browser_polarization_data.csv'),'utf8').includes('I_disk_smoothed_plot_only_A'));
+    const svgDownload = page.waitForEvent('download');
+    await page.getByRole('button',{name:'SVG · 矢量图',exact:true}).click();
+    await (await svgDownload).saveAs(path.join(output,'browser_polarization.svg'));
+    assert(fs.readFileSync(path.join(output,'browser_polarization.svg'),'utf8').includes('21 points'));
+    await page.getByRole('link',{name:/导出与项目/}).click();
+    await page.getByRole('heading',{name:'导出与项目',exact:true}).waitFor();
+    await page.getByRole('button',{name:'保存分析项目 .orrproj',exact:true}).waitFor();
+    const projectDownload = page.waitForEvent('download');
+    await page.getByRole('button',{name:'保存分析项目 .orrproj',exact:true}).click();
+    await (await projectDownload).saveAs(path.join(output,'browser_saved_project.orrproj'));
+    await page.screenshot({path:path.join(output,'browser_export.png'),fullPage:true});
+    await page.getByRole('link',{name:/导入与设置/}).click();
+    await page.getByText('继续上次的分析项目',{exact:true}).click();
+    await page.locator('input[type="file"]').nth(1).setInputFiles(path.join(output,'browser_saved_project.orrproj'));
+    await page.getByRole('button',{name:'载入项目（替换当前工作区）',exact:true}).click();
+    await page.getByText('已载入项目，原始数据和参数已恢复。',{exact:true}).waitFor();
+    await page.getByRole('link',{name:/极化曲线/}).click();
+    await page.getByRole('button',{name:'PNG · 300 dpi',exact:true}).waitFor();
+    assert.equal(await page.getByRole('switch',{name:'启用曲线平滑',exact:true}).isChecked(),true);
+    assert.equal(await page.getByRole('switch',{name:'显示浅色未平滑参考线',exact:true}).isChecked(),false);
+    assert((await page.getByRole('combobox',{name:'平滑强度',exact:true}).inputValue()).includes('中'));
+    assert.deepEqual(failures,[]);
+    fs.writeFileSync(path.join(output,'browser_report.json'),JSON.stringify({passed:true,pages:['import','scan','curves','export'],downloads:['CSV','SVG','project'],smoothing:{defaultOff:true,window:21,displayOnlyColumn:true,referenceVisible:false,restored:true},projectRestored:true,pageErrors:failures},null,2));
+    console.log('Browser smoke passed: display smoothing, CSV/SVG download, project save and smoothing restore.');
+  } finally {
+    await browser.close();
+  }
+})().catch(e => { console.error(e); process.exitCode=1; });
