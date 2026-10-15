@@ -1,10 +1,10 @@
 import streamlit as st
 from ui_shared import initialize, invalidate
 
-st.set_page_config(page_title="ORR Workbench", page_icon=":material/science:", layout="wide")
+st.set_page_config(page_title="ORR Worker", page_icon=":material/science:", layout="wide")
 initialize()
 with st.sidebar:
-    st.title("ORR Workbench")
+    st.title("ORR Worker")
     st.caption("辰华 CV · K–L · RRDE")
     current_axis = st.session_state.settings.get("axis", "RHE")
     axis = st.selectbox("分析与导出的电位坐标", ["RHE", "原始"], index=0 if current_axis=="RHE" else 1,

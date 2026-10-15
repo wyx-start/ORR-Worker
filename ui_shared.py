@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from background_ph import (activate_ph_links, finite_ph, synchronize_ph_links)
+
 from orr_core import (DataError, VERSION, default_config, json_bytes, parameter_record,
                       parse_chi, process_trace, scan_segments, select_segment)
 
@@ -33,6 +35,7 @@ def initialize():
 
 
 def invalidate():
+    synchronize_ph_links(st.session_state.configs, {k:t.name for k,t in st.session_state.traces.items()})
     st.session_state.revision += 1
     st.session_state.results = {}
     st.session_state.exports = {}
@@ -179,6 +182,43 @@ def axis_label(outputs):
     return "E / V (original reference)"
 
 
+def background_ph_panel(background_ids, prefix):
+    """Explicit controls for one physical background, shared by its samples."""
+    for ident in dict.fromkeys(background_ids):
+        if ident not in st.session_state.configs:
+            continue
+        cfg = st.session_state.configs[ident]
+        with st.expander(f"背景 pH：{st.session_state.traces[ident].name}",
+                         key=f"background_ph_panel_{prefix}_{ident}", on_change="rerun"):
+            detail = cfg.get("background_ph_detail", "尚未关联样品")
+            if cfg.get("background_ph_status") in ("conflict", "manual_difference", "invalid"):
+                st.warning(detail)
+            else:
+                st.caption(detail)
+            sources = cfg.get("background_ph_sources", [])
+            if sources:
+                st.dataframe(pd.DataFrame([{"关联样品":s["filename"], "已应用 pH":s["pH"]} for s in sources]), hide_index=True)
+            st.caption("此模式作用于这一个背景文件及所有使用它的样品。仅 pH 联动；参比与温度等条件仍独立保存。")
+            key = f"{prefix}_{ident}_{st.session_state.revision}_"
+            options = ["跟随关联样品（默认）", "独立填写背景 pH"]
+            mode = st.selectbox("背景 pH 模式", options,
+                index=1 if cfg.get("background_ph_mode") == "manual" else 0,
+                key=key+"mode", persist_state="session")
+            manual = mode == options[1]
+            value = None
+            if manual:
+                value = st.number_input("背景独立 pH（允许 0）", value=finite_ph(cfg.get("pH")),
+                    step=.1, format="%.3f", key=key+"value", persist_state="session")
+            if st.button("应用背景 pH 设置", key=key+"apply"):
+                cfg.update(background_ph_mode="manual" if manual else "follow", background_ph_legacy=False)
+                if manual:
+                    cfg["pH"] = value
+                    cfg.setdefault("parameter_sources", {})["pH"] = "人工独立填写背景 pH"
+                st.session_state.conditions_notice = "已应用背景 pH 设置；关联状态已重新核对。"
+                invalidate()
+                st.rerun()
+
+
 def per_file_form():
     st.subheader("扫描、通道与背景")
     ids = list(st.session_state.traces)
@@ -199,7 +239,7 @@ def per_file_form():
         st.warning(str(exc))
     st.caption(f"盘通道 {cfg.get('disk_channel', 0)+1}" +
                (f" / 环通道 {cfg.get('ring_channel')+1 if cfg.get('ring_channel') is not None else '未设置'}；通道为建议，请核对接线。" if multi else " · 单电流通道。"))
-    with st.expander("修改扫描、通道与背景"):
+    with st.expander("修改扫描、通道与背景", key=f"scan_editor_{ident}", on_change="rerun"):
         updates = {}
         updates["mode"] = st.selectbox("自动选择规则", ["A", "B"], index=0 if cfg.get("mode", "A")=="A" else 1,
             format_func=lambda m: "A · 最后完整循环内的支线" if m=="A" else "B · 最后完整单向支线",
@@ -220,6 +260,7 @@ def per_file_form():
         updates["background_disk"] = st.selectbox("盘背景", backgrounds,
             index=backgrounds.index(cfg.get("background_disk")) if cfg.get("background_disk") in backgrounds else 0,
             format_func=file_formatter(), key=prefix+"bg_disk", persist_state="session")
+        st.caption("提交新背景关联后，默认沿用样品已应用的 pH；已有独立 pH 保留并核对差异。")
         if multi:
             with st.expander("高级：盘环通道与符号"):
                 channels = list(range(len(trace.columns)-1))
@@ -263,6 +304,7 @@ def per_file_form():
                 changed_records = [field for field in ("ring_material", "ring_potential_V")
                                    if field in updates and cfg.get(field) != updates[field]]
                 cfg.update(updates, background_reviewed=True)
+                activate_ph_links(st.session_state.configs, [updates.get("background_disk"), updates.get("background_ring")])
                 sources = cfg.setdefault("parameter_sources", {})
                 for field in changed_records:
                     sources[field] = "人工输入"
@@ -272,6 +314,8 @@ def per_file_form():
                             st.session_state.configs[key].update(mode=updates["mode"], direction=updates["direction"], manual_segment=None)
                 invalidate()
                 st.rerun()
+    committed_backgrounds = [cfg.get("background_disk"), cfg.get("background_ring")]
+    background_ph_panel([i for i in committed_backgrounds if i is not None], f"scan_ph_{ident}")
     if manual_enabled:
         figure_style()
         fig, ax = plt.subplots(figsize=(8, 3.5), layout="constrained")

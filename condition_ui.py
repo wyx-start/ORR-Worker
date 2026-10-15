@@ -10,7 +10,7 @@ from experiment_conditions import (apply_conditions, area_from_diameter, load_pr
     linked_backgrounds, missing_conditions, save_profile, snapshot_conditions,
     unapplied_changes, validate_conditions)
 from orr_core import DataError
-from ui_shared import REFERENCE_PRESETS, file_formatter, invalidate
+from ui_shared import REFERENCE_PRESETS, background_ph_panel, file_formatter, invalidate
 
 METHODS = ["理论换算", "实测 RHE 总偏移", "已是 RHE"]
 
@@ -87,7 +87,8 @@ def _profiles(cfg, targets, prefix, pending=False):
                 try:
                     updated = copy.deepcopy(st.session_state.configs)
                     for ident in targets:
-                        apply_conditions(updated[ident], values, source=source, overwrite=overwrite)
+                        apply_conditions(updated[ident], values, source=source, overwrite=overwrite,
+                                         background_ph_edit=cfg.get("role") == "背景")
                     st.session_state.configs = updated
                     invalidate()
                     st.rerun()
@@ -141,13 +142,17 @@ def common_parameter_form(purpose="curves", ids=None, density=False, expanded=Fa
         cfg = st.session_state.configs[ident]
         issues = missing_conditions(cfg, purpose, axis, density)
         has_potential_issue |= bool(missing_conditions(cfg, "curves", axis))
+        background_details = []
         for bgid in linked_backgrounds(cfg, st.session_state.configs):
+            bgcfg = st.session_state.configs[bgid]
+            background_details.append(f"{st.session_state.traces[bgid].name}：{bgcfg.get('background_ph_detail', 'pH 独立设置')}")
             bg_issues = missing_conditions(st.session_state.configs[bgid], "curves", axis)
             if bg_issues:
                 has_potential_issue = True
                 issues.append(f"背景“{st.session_state.traces[bgid].name}”：" + "；".join(bg_issues))
         rows.append({"文件":st.session_state.traces[ident].name,
                      "条件摘要":_source_summary(cfg, purpose, density, axis),
+                     "背景 pH":"；".join(background_details) or "未关联背景",
                      "当前待完成":"；".join(issues) if issues else "本页基础参数齐备"})
     st.dataframe(pd.DataFrame(rows), hide_index=True)
     if has_potential_issue and axis == "RHE":
@@ -157,7 +162,7 @@ def common_parameter_form(purpose="curves", ids=None, density=False, expanded=Fa
             st.session_state.conditions_notice = "已切换为原始电位，当前不执行 RHE 换算。"
             invalidate()
             st.rerun()
-    with st.expander("修改实验条件", expanded=expanded):
+    with st.expander("修改实验条件", expanded=expanded, key=f"condition_editor_{purpose}", on_change="rerun"):
         source_options = list(dict.fromkeys(ids + [i for i in allowed_ids if st.session_state.configs[i].get("role") == "背景"]))
         source = st.selectbox("读取设置的文件", source_options, format_func=file_formatter(),
             key=f"condition_source_{purpose}", persist_state="session")
@@ -177,9 +182,14 @@ def common_parameter_form(purpose="curves", ids=None, density=False, expanded=Fa
             for bgid in linked_backgrounds(st.session_state.configs[ident], st.session_state.configs) if bgid not in targets))
         if background_ids:
             names = "、".join(st.session_state.traces[i].name for i in background_ids)
-            st.info(f"关联背景尚未包含在应用范围：{names}。RHE 背景扣除需要背景自己的换算条件；若实验条件相同，可加入后一并应用，否则单独选择背景文件设置。")
+            st.info(f"关联背景：{names}。背景 pH 按其当前模式联动或独立保存。若其他实验条件也相同，可加入范围后一并应用；参比等不同则单独设置。")
             st.button("将关联背景加入应用范围", key=f"include_backgrounds_{purpose}",
                 on_click=_include_background_targets, args=(target_key, background_ids))
+        all_backgrounds = list(dict.fromkeys(bgid for ident in targets
+            for bgid in linked_backgrounds(st.session_state.configs[ident], st.session_state.configs)))
+        if is_background:
+            all_backgrounds = [source]
+        background_ph_panel(all_backgrounds, f"conditions_ph_{purpose}_{source}")
         draft_notice = st.empty()
         values = {}
         if axis == "RHE":
@@ -243,7 +253,7 @@ def common_parameter_form(purpose="curves", ids=None, density=False, expanded=Fa
                     raise DataError("该参比预设仅限 25 °C。请选择对应温度的自定义值或实测 RHE 总偏移。")
                 updated = copy.deepcopy(st.session_state.configs)
                 for ident in targets:
-                    apply_conditions(updated[ident], values)
+                    apply_conditions(updated[ident], values, background_ph_edit=is_background)
                 st.session_state.configs = updated
                 st.session_state.conditions_notice = f"已应用实验条件到 {len(targets)} 个文件。"
                 invalidate()

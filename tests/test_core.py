@@ -98,6 +98,7 @@ class NumericalTests(unittest.TestCase):
         t, b = sample(), sample("Ar-5mv-beijing.txt")
         cfg, bcfg = default_config(t), default_config(b)
         cfg.update(pH=13., ref_V_SHE=.197, background_disk=b.id)
+        bcfg["background_ph_mode"] = "manual"
         with self.assertRaisesRegex(DataError, "盘背景.*Ar-5mv-beijing.*pH"):
             process_trace(t, cfg, {t.id:t, b.id:b}, {t.id:cfg, b.id:bcfg}, "RHE")
 

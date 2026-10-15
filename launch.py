@@ -55,7 +55,7 @@ def healthy(url):
 
 def error_dialog(message):
     if os.name=="nt":
-        ctypes.windll.user32.MessageBoxW(0, message, "ORR Workbench", 0x10)
+        ctypes.windll.user32.MessageBoxW(0, message, "ORR Worker", 0x10)
     else:
         print(message)
 

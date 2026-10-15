@@ -10,10 +10,12 @@ from pathlib import Path
 import re
 import zipfile
 
+from background_ph import default_ph_link, ph_link_error, resolved_configs
+
 import numpy as np
 import pandas as pd
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 FARADAY = 96485.33212
 GAS_CONSTANT = 8.314462618
 SOURCES = {
@@ -336,7 +338,7 @@ def default_config(trace: Trace) -> dict:
     return dict(name=stem, group=guess["group"], role=role, **{k:guess[k] for k in RPM_FIELDS},
                 direction="递减", mode="A", manual_segment=None, disk_channel=0,
                 ring_channel=1 if len(trace.columns) >= 3 else None,
-                disk_sign=-1, ring_sign=1, area_cm2=math.pi * (5. / 20.)**2,
+                disk_sign=-1, ring_sign=1, **default_ph_link(), area_cm2=math.pi * (5. / 20.)**2,
                 disk_diameter_mm=5., area_mode="diameter", collection_efficiency=None,
                 parameter_sources={"area_cm2":"软件默认：5 mm RDE（用户指定）",
                                    "disk_diameter_mm":"软件默认：5 mm RDE（用户指定）",
@@ -423,6 +425,8 @@ def interpolate(x, y, target):
 
 
 def process_trace(trace, cfg, traces, configs, axis="RHE"):
+    configs = resolved_configs({**configs, trace.id:cfg}, {k:t.name for k,t in traces.items()})
+    cfg = configs[trace.id]
     rows, e, disk, segment = base_curve(trace, cfg, axis)
     notes = list(trace.warnings)
     if cfg.get("manual_segment"):
@@ -453,6 +457,11 @@ def process_trace(trace, cfg, traces, configs, axis="RHE"):
         if bgid not in traces or bgid == trace.id:
             raise DataError("背景文件不存在或错误地选择了自身。")
         bg, bgcfg = traces[bgid], configs[bgid]
+        link_error = ph_link_error(bgcfg)
+        if link_error:
+            raise DataError(f"背景“{bg.name}”：{link_error}")
+        if bgcfg.get("background_ph_detail"):
+            notes.append(f"背景 {bg.name}：{bgcfg['background_ph_detail']}")
         if potential_signature(cfg, axis) != potential_signature(bgcfg, axis):
             raise DataError("样品与背景原始参比不一致；请统一换算到 RHE 后再扣除。")
         try:
@@ -609,6 +618,7 @@ def json_bytes(value):
 
 
 def pack_project(traces, configs, settings):
+    configs = resolved_configs(configs, {k:t.name for k,t in traces.items()})
     manifest = dict(schema=1, app_version=VERSION, settings=settings, files=[])
     output = BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -637,6 +647,10 @@ def unpack_project(raw):
                 if not isinstance(entry["config"], dict):
                     raise DataError("项目参数结构不正确。")
                 defaults.update({k:v for k,v in entry["config"].items() if k in defaults})
+                if "background_ph_mode" not in entry["config"]:
+                    # Existing values and empty records remain independent until
+                    # a user explicitly enables following or confirms a binding.
+                    defaults.update(background_ph_mode="manual", background_ph_legacy=True)
                 if "parameter_sources" not in entry["config"]:
                     defaults["parameter_sources"] = {k:"项目保存值，来源未记录" for k in
                         ("area_cm2", "temperature_C", "potential_method", "pH", "ref_V_SHE", "collection_efficiency")
@@ -654,7 +668,7 @@ def unpack_project(raw):
                                     rpm_note="项目保存值，来源未记录；未重新识别覆盖。")
                 traces[trace.id] = trace
                 configs[trace.id] = defaults
-            return traces, configs, manifest["settings"]
+            return traces, resolved_configs(configs, {k:t.name for k,t in traces.items()}), manifest["settings"]
     except DataError:
         raise
     except (ValueError, KeyError, TypeError, zipfile.BadZipFile, OSError) as exc:
@@ -662,6 +676,7 @@ def unpack_project(raw):
 
 
 def parameter_record(traces, configs, settings, processed=None):
+    configs = resolved_configs(configs, {k:t.name for k,t in traces.items()})
     return dict(app_version=VERSION, sources=SOURCES, settings=settings,
                 formulas={"RHE": "E_vs_ref + E_ref_vs_SHE(T) + 2.303RT/F*pH; calibrated total offset is used alone",
                           "RRDE": "H2O2%=200*(R/N)/(D+R/N); n=4*D/(D+R/N); D,R are signed-background-corrected positive reaction magnitudes",

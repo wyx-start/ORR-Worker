@@ -1,6 +1,7 @@
 from pathlib import Path
 import pandas as pd
 import streamlit as st
+from background_ph import activate_ph_links
 from ui_shared import (ROOT, add_files, file_formatter, invalidate, label,
                        per_file_form, require_files, show_errors)
 from condition_ui import common_parameter_form
@@ -88,6 +89,8 @@ if applied:
                        background_disk=bg_lookup.get(row["盘背景"]),background_reviewed=True)
             updates[ident] = cfg
         configs.update(updates)
+        activate_ph_links(configs, [cfg.get(field) for cfg in updates.values() if cfg.get("role") != "背景"
+                                  for field in ("background_disk", "background_ring")])
         invalidate()
         st.rerun()
     except DataError as exc:

@@ -1,6 +1,6 @@
-# ORR Workbench 项目说明
+# ORR Worker 项目说明
 
-版本：1.3.1。首次交付：2026-10-14；本次更新：2026-10-15。本文件供后续开发者或 Codex 会话继续改进。
+版本：1.4.0。首次交付：2026-10-14；本次更新：2026-10-15。本文件供后续开发者或 Codex 会话继续改进。
 
 ## 1. 已确认的需求与边界
 
@@ -66,6 +66,7 @@ orr_workbench/
   orr_core.py               纯数据解析和科学计算，不依赖 Streamlit
   plot_smoothing.py         独立绘图副本平滑、连续段/采样检查与记录
   experiment_conditions.py  纯参数校验、面积换算、预设存取与应用规则
+  background_ph.py          独立的背景 pH 依赖、模式、来源及冲突解析
   condition_ui.py           按用途显示条件、默认项、必填摘要及预设界面
   ui_shared.py              扫描/背景表单、批量状态、图形、导出工具
   launch.py                 Windows 本地启动与停止
@@ -143,6 +144,16 @@ TXT bytes
 项目仍是 schema=1。恢复缺少完整 RPM 来源字段的旧项目时，用保存的 rpm（包括 None）覆盖新默认值，来源记为 saved_project，清空新推测依据；不能将旧人工值冒充新算法识别。新项目完整保留来源、匹配和候选。
 
 ## 5. 科学计算规则
+
+### 背景 pH 联动（1.4.0）
+
+新增 `background_ph_mode`（auto/follow/manual）、`background_ph_status`、`background_ph_sources`、`background_ph_detail` 与旧项目兼容标记。`background_ph.resolved_configs` 先读取完整配置快照，再按实际盘/环绑定建立入边，去重同一样品；同一背景只有一个有效 pH。模式为 auto 且没有独立值时采用 follow；已有值按独立记录保护。已知 pH 在绝对容差 1e-9 内一致才联动，未知值不反向补样品；不同已知值使 pH 失效并标明冲突。
+
+`invalidate()` 在清空旧结果前同步派生状态，覆盖绑定、参数应用、预设、移除与恢复；`process_trace`、`pack_project`、`parameter_record` 和 `unpack_project` 独立重新解析，防止绕过 UI 使用陈旧值。原始坐标同样阻止明确冲突；实测 RHE 总偏移/已是 RHE 仍无需为了电位换算补 pH。不同的独立 pH 保留并提示，不自动伪造同条件。
+
+元数据和逐文件提交调用 `activate_ph_links`，候选预览不调用。旧项目缺少模式时保留独立 pH，包括空白；主动重新确认空背景绑定或开启 follow 后可采用新规则。解绑最后一个来源仅清理派生值，独立值保留。未复制参比、温度、气氛、面积或 N。
+
+`apply_conditions(..., background_ph_edit=...)` 区分直接编辑背景与从样品批量应用：后者不会意外将 follow 变成 manual；前者改变 pH 时显式转为独立。跟随关系字段不进入常用预设白名单。具体审核和测试记录见 `REVIEW_1.4.0.md` 与 `VALIDATION.md`。
 
 ### 条件与默认值（1.3.0）
 

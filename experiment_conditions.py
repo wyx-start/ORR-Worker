@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 
 from orr_core import DataError, require_number, rhe_shift
+from background_ph import ph_link_error
 
 PROFILE_PATH = Path(__file__).resolve().parent / "user_settings" / "experiment_presets.json"
 CONDITION_FIELDS = (
@@ -54,7 +55,7 @@ def validate_conditions(values):
     return values
 
 
-def apply_conditions(cfg, values, source="人工输入", overwrite=True):
+def apply_conditions(cfg, values, source="人工输入", overwrite=True, background_ph_edit=True):
     values = snapshot_conditions(values)
     validate_conditions(values)
     sources = cfg.setdefault("parameter_sources", {})
@@ -74,6 +75,13 @@ def apply_conditions(cfg, values, source="人工输入", overwrite=True):
             allowed = overwrite or cfg.get(key) in (None, "", "未设置") or str(sources.get(key, "")).startswith("软件默认")
         if not allowed:
             continue
+        if key == "pH" and cfg.get("role") == "背景":
+            if background_ph_edit and (cfg.get("pH") != value or value is not None and cfg.get("background_ph_mode") != "follow"):
+                cfg.update(background_ph_mode="manual", background_ph_legacy=False)
+            elif not background_ph_edit and cfg.get("background_ph_mode") in ("auto", "follow"):
+                # Applying a sample's settings to its included background is
+                # still a sample edit; it must not silently disable following.
+                cfg.update(background_ph_mode="follow", background_ph_legacy=False)
         origin = prior_sources.get(key)
         field_source = f"{source}；原始来源：{origin}" if origin and origin != source else source
         if source == "人工输入" and cfg.get(key) == value and key in sources:
@@ -91,7 +99,9 @@ def apply_conditions(cfg, values, source="人工输入", overwrite=True):
 
 def missing_conditions(cfg, purpose="curves", axis="RHE", density=False):
     issues = []
-    if axis == "RHE":
+    if ph_link_error(cfg):
+        issues.append(ph_link_error(cfg))
+    if axis == "RHE" and not ph_link_error(cfg):
         try:
             rhe_shift(cfg)
         except (DataError, ValueError, TypeError) as exc:

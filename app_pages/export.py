@@ -24,5 +24,5 @@ for name, info in list(exports.items()):
 st.download_button("打包下载当前全部结果 ZIP",zip_exports(exports),"orr_results.zip","application/zip",on_click="ignore")
 st.subheader("保存可继续编辑的项目")
 project = pack_project(st.session_state.traces,st.session_state.configs,st.session_state.settings)
-st.download_button("保存分析项目 .orrproj",project,"ORR_analysis.orrproj","application/zip",on_click="ignore")
+st.download_button("保存分析项目 .orrproj",project,"ORR_Worker_analysis.orrproj","application/zip",on_click="ignore")
 st.caption("项目包含原始 TXT 与参数；载入时重新解析和计算。浏览器页面关闭不等于已保存，请在离开前下载项目。原始实验文件不会被修改。")
