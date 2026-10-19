@@ -12,6 +12,7 @@ PRESET_WINDOWS = {"弱": 11, "中": 21, "强": 51}
 SMOOTH_A = "I_disk_smoothed_plot_only_A"
 SMOOTH_MA = "I_disk_smoothed_plot_only_mA"
 SMOOTH_DENSITY = "j_disk_smoothed_plot_only_mA_cm2"
+SMOOTH_RING_A = "I_ring_smoothed_plot_only_A"
 SPACING_RTOL = .01
 SPACING_ATOL_V = 1e-9
 
@@ -25,13 +26,16 @@ def smoothing_defaults(settings=None):
     return result
 
 
-def smooth_for_plot(frame: pd.DataFrame, settings: dict):
+def smooth_for_plot(frame: pd.DataFrame, settings: dict, channel="disk"):
     """Return a copy and an auditable report, leaving every existing column unchanged.
 
     No interpolation, gap filling, current clipping or electrochemical recalculation.
     SG is applied only within finite, sufficiently long, uniformly spaced runs.
     """
     cfg = smoothing_defaults(settings)
+    if channel not in ("disk", "ring"):
+        raise DataError("无效的绘图平滑通道。")
+    current_column = f"I_{channel}_A"
     output = frame.copy(deep=True)
     report = dict(enabled=bool(cfg["enabled"]), scope="polarization_plot_only",
                   algorithm="Savitzky–Golay", polyorder=2, mode="interp",
@@ -39,16 +43,18 @@ def smooth_for_plot(frame: pd.DataFrame, settings: dict):
                   spacing_rtol=SPACING_RTOL, spacing_atol_V=SPACING_ATOL_V,
                   applied_points=0, preserved_points=0, gap_points=0,
                   segments=[], notes=[], status="disabled")
+    if channel == "ring":
+        report.update(scope="ring_current_plot_only", channel="ring")
     if not cfg["enabled"]:
         return output, report
     window = cfg["window_points"]
     if isinstance(window, bool) or not isinstance(window, (int, np.integer)) or not 5 <= window <= 1001 or window % 2 != 1:
         raise DataError("平滑窗口应为 5–1001 的奇数点数；不会自动更改你的参数。")
     window = int(window)
-    if "E_V" not in frame or "I_disk_A" not in frame:
-        raise DataError("绘图平滑需要已处理的电位与盘电流列。")
+    if "E_V" not in frame or current_column not in frame:
+        raise DataError("绘图平滑需要已处理的电位与所选电流列。")
     x = frame.E_V.to_numpy(dtype=float)
-    y = frame.I_disk_A.to_numpy(dtype=float)
+    y = frame[current_column].to_numpy(dtype=float)
     finite = np.isfinite(x) & np.isfinite(y)
     smoothed = y.copy()
     smoothed[~finite] = np.nan
@@ -92,9 +98,12 @@ def smooth_for_plot(frame: pd.DataFrame, settings: dict):
     else:
         report["status"] = "applied"
     report["notes"] = list(dict.fromkeys(report["notes"]))
-    output[SMOOTH_A] = smoothed
-    output[SMOOTH_MA] = smoothed*1000
-    if "j_disk_mA_cm2" in frame:
+    output[SMOOTH_A if channel == "disk" else SMOOTH_RING_A] = smoothed
+    output[SMOOTH_MA if channel == "disk" else "I_ring_smoothed_plot_only_mA"] = smoothed*1000
+    if channel == "ring":
+        output["I_ring_smoothed_plot_only_uA"] = smoothed*1e6
+        report.update(scope="ring_current_plot_only", channel="ring")
+    if channel == "disk" and "j_disk_mA_cm2" in frame:
         # Retain the exact same normalization factor as the processed source column.
         j = frame.j_disk_mA_cm2.to_numpy(dtype=float)
         factors = np.divide(j, y, out=np.full(len(y), np.nan), where=finite & (y != 0))

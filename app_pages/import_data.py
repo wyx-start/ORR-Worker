@@ -2,6 +2,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from background_ph import activate_ph_links
+from background_pairing import apply_background_binding
 from ui_shared import (ROOT, add_files, file_formatter, invalidate, label,
                        per_file_form, require_files, show_errors)
 from condition_ui import common_parameter_form
@@ -68,12 +69,17 @@ for ident, trace in st.session_state.traces.items():
         bg = backgrounds[0]
     rows.append({"id":ident, "文件":trace.name, "样品/图例":cfg["name"], "分组":cfg["group"], "用途":cfg["role"],
                  "转速/rpm":cfg.get("rpm"), "转速来源":rpm_source_label(cfg),
+                 "背景模式":"盘环配对" if cfg.get("background_mode") == "paired" else "分别指定",
                  "盘背景":label(bg) if bg in st.session_state.traces else "不扣除",
+                 "环背景":label(cfg["background_ring"]) if cfg.get("background_ring") in st.session_state.traces else "不扣除",
                  "数据点":len(trace.values)})
+st.caption("盘环配对模式：选择“盘背景”作为共同背景，应用时自动盘扣盘、环扣环；“环背景”列仅在分别指定模式生效。单通道文件使用分别指定。")
 with st.form(f"metadata_{st.session_state.revision}"):
     edited = st.data_editor(pd.DataFrame(rows), hide_index=True, disabled=["id", "文件", "数据点", "转速来源"],
         column_config={"id":None, "用途":st.column_config.SelectboxColumn(options=["样品", "RRDE", "背景"], required=True),
                        "转速/rpm":st.column_config.NumberColumn(min_value=0., step=1.),
+                       "背景模式":st.column_config.SelectboxColumn(options=["盘环配对", "分别指定"], required=True),
+                       "环背景":st.column_config.SelectboxColumn(options=["不扣除"]+[label(i) for i in backgrounds], required=True),
                        "盘背景":st.column_config.SelectboxColumn(options=["不扣除"]+[label(i) for i in backgrounds], required=True)},
         key=f"metadata_table_{st.session_state.revision}")
     applied = st.form_submit_button("确认并应用分组与背景", type="primary")
@@ -85,9 +91,14 @@ if applied:
             ident = row["id"]
             cfg = dict(configs[ident])
             set_manual_rpm(cfg,None if pd.isna(row["转速/rpm"]) else row["转速/rpm"])
-            cfg.update(name=str(row["样品/图例"] or row["文件"]),group=str(row["分组"] or "未分组"),role=row["用途"],
-                       background_disk=bg_lookup.get(row["盘背景"]),background_reviewed=True)
+            cfg.update(name=str(row["样品/图例"] or row["文件"]),group=str(row["分组"] or "未分组"),role=row["用途"])
             updates[ident] = cfg
+        for row in edited.to_dict("records"):
+            ident = row["id"]
+            cfg = updates[ident]
+            mode = "paired" if row["背景模式"] == "盘环配对" and cfg.get("role") != "背景" else "independent"
+            apply_background_binding(ident, cfg, st.session_state.traces, updates, mode,
+                                     bg_lookup.get(row["盘背景"]), bg_lookup.get(row["环背景"]))
         configs.update(updates)
         activate_ph_links(configs, [cfg.get(field) for cfg in updates.values() if cfg.get("role") != "背景"
                                   for field in ("background_disk", "background_ring")])

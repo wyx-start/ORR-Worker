@@ -166,6 +166,22 @@ class NumericalTests(unittest.TestCase):
         with self.assertRaises(DataError):
             kl_calculate(curves, [-.6], C, D, nu)
 
+    def test_KL_parameter_scaling_and_unphysical_values_are_not_clipped(self):
+        for field, factor, expected in (("C",10.,.32), ("D",8.,.8), ("nu",64.,6.4),
+                                        ("area_cm2",10.,.32), ("rpm",4.,1.6)):
+            with self.subTest(field=field):
+                curves, C, D, nu, _ = self.synthetic_kl()
+                parameters = dict(C=C, D=D, nu=nu)
+                if field in parameters:
+                    parameters[field] *= factor
+                else:
+                    for curve in curves:
+                        curve["config"][field] *= factor
+                result, _ = kl_calculate(curves, [-.6], **parameters)
+                self.assertAlmostEqual(result.n_KL.iloc[0], expected, places=10)
+                self.assertFalse(result.valid_two_path_model.iloc[0])
+                self.assertIn("未裁剪", result.status.iloc[0])
+
     def test_project_preserves_raw_and_parameters(self):
         t = sample()
         cfg = default_config(t)

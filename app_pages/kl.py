@@ -26,6 +26,15 @@ if len(selected)<2:
     st.info("请把至少两个不同转速文件设置为同一组，并在上方选择。")
     st.stop()
 chosen = {k:outputs[k] for k in selected}
+with st.expander("核对实际参与计算的文件参数", expanded=True):
+    st.dataframe([{
+        "文件":o["name"], "转速 / rpm":o["config"].get("rpm"),
+        "盘面积 / cm²":o["config"].get("area_cm2"), "pH":o["config"].get("pH"),
+        "温度 / °C":o["config"].get("temperature_C"),
+        "电解液":o["config"].get("electrolyte", ""),
+        "电位坐标":o["axis"], "扫描方向":o["segment"]["direction"],
+    } for o in chosen.values()], hide_index=True)
+    st.caption("以上是已应用参数。5 mm 盘对应约 0.19635 cm²；转速填 rpm，程序自动换算为 rad/s。")
 low = max(o["data"].E_V.min() for o in chosen.values())
 high = min(o["data"].E_V.max() for o in chosen.values())
 if low>=high:
@@ -44,14 +53,18 @@ with st.form(f"kl_input_{st.session_state.revision}_{st.session_state.get('kl_fo
     else:
         a, b, c = st.columns(3)
         with a:
-            C = st.number_input("氧浓度 C / mol·cm⁻³ *", value=params.get("C"), min_value=1e-12, format="%.8e", step=1e-7, key="kl_custom_C", persist_state="session")
+            C = st.number_input("氧浓度 C / mol·cm⁻³ *", value=params.get("C"), min_value=1e-12, format="%.8e", step=1e-7, key="kl_custom_C", persist_state="session",
+                help="填写溶解氧浓度，不是电解液浓度。若来源单位为 mol/L，需除以 1000 后填入。")
         with b:
-            D = st.number_input("扩散系数 D / cm²·s⁻¹ *", value=params.get("D"), min_value=1e-12, format="%.8e", step=1e-6, key="kl_custom_D", persist_state="session")
+            D = st.number_input("扩散系数 D / cm²·s⁻¹ *", value=params.get("D"), min_value=1e-12, format="%.8e", step=1e-6, key="kl_custom_D", persist_state="session",
+                help="若来源单位为 m²/s，需乘以 10000 后填入。请使用实际电解液和温度下的氧扩散系数。")
         with c:
-            nu = st.number_input("运动黏度 ν / cm²·s⁻¹ *", value=params.get("nu"), min_value=1e-12, format="%.8e", step=.001, key="kl_custom_nu", persist_state="session")
+            nu = st.number_input("运动黏度 ν / cm²·s⁻¹ *", value=params.get("nu"), min_value=1e-12, format="%.8e", step=.001, key="kl_custom_nu", persist_state="session",
+                help="需要运动黏度，不是动力黏度。若来源单位为 m²/s，需乘以 10000；若为 cSt，需乘以 0.01。")
         source = st.text_input("参数来源与适用条件（选填记录）", value=params.get("source", ""), placeholder="文献 DOI 或实验测定记录；包括温度、电解液、氧饱和情况", key="kl_custom_source", persist_state="session")
     st.caption(f"共同覆盖区间：{low:.5f} ～ {high:.5f} V（{st.session_state.settings['axis']}）。")
-    with st.expander("高级：分析区间与点数"):
+    with st.expander("分析区间与点数（请核对）", expanded=True):
+        st.caption("初始范围仅表示数据共同覆盖，并未识别适用的 ORR 反应区间。请结合各转速曲线选择分析电位，避开电流过小、反向及其他反应区；不要以 n 是否落在 2–4 内反推区间。")
         a, b, c = st.columns(3)
         with a:
             start = st.number_input("分析起点 / V", value=float(max(low, min(params.get("start",low),high))), format="%.5f")
@@ -62,6 +75,11 @@ with st.form(f"kl_input_{st.session_state.revision}_{st.session_state.get('kl_fo
     confirmed = st.checkbox("已核对：各文件属于同一电极和相同实验条件，以上物性参数适用")
     run = st.form_submit_button("计算 K–L", type="primary")
 if run:
+    # A failed new attempt must not leave the preceding fit looking current.
+    st.session_state.results.pop("kl", None)
+    for filename in list(st.session_state.exports):
+        if filename.startswith("kl_"):
+            st.session_state.exports.pop(filename)
     try:
         if not confirmed:
             raise DataError("请先核对实验条件和物性参数。")
@@ -74,6 +92,8 @@ if run:
         potentials = np.linspace(start, end, count) if count>1 else np.array([start])
         result, points = kl_calculate(list(chosen.values()), potentials, C, D, nu)
         params.update(C=C, D=D, nu=nu, source=source, start=start, end=end, count=count, selected=selected, group=group,
+                      axis=st.session_state.settings["axis"],
+                      units={"C":"mol/cm³", "D":"cm²/s", "nu":"cm²/s", "current_density":"A/cm²", "rotation_input":"rpm", "rotation_fit":"rad/s"},
                       scheme="koh_25C" if use_preset else "custom", condition=KOH_PRESET["electrolyte"] if use_preset else "用户自定义")
         st.session_state.results["kl"] = dict(data=result, points=points, selected=selected, params=dict(params), revision=st.session_state.revision)
     except (DataError, ValueError) as exc:
@@ -82,6 +102,11 @@ saved = st.session_state.results.get("kl")
 if saved:
     st.caption("以下为上次点击“计算 K–L”的结果；修改输入后请重新计算。")
     result, points = saved["data"], saved["points"]
+    used = saved["params"]
+    st.caption(f"本次结果使用：C={used['C']:.6g} mol/cm³，D={used['D']:.6g} cm²/s，ν={used['nu']:.6g} cm²/s；分析范围 {used['start']:.5f} ～ {used['end']:.5f} V（{used.get('axis', st.session_state.settings['axis'])}）。")
+    invalid_count = int((~result.valid_two_path_model).sum())
+    if invalid_count:
+        st.warning(f"{len(result)} 个电位中有 {invalid_count} 个不满足两路径模型检查。请查看 status：电流过小或反向、斜率非正、负截距、n 超出 2–4 均需核对。原始数值保留；负数或超过 100% 的模型比例不可作为有效选择性。")
     st.dataframe(result, hide_index=True)
     st.download_button("单独导出 K–L 结果 CSV", store_table("kl_results.csv", result), "kl_results.csv", "text/csv")
     st.download_button("单独导出拟合点 CSV", store_table("kl_fit_points.csv", points), "kl_fit_points.csv", "text/csv")

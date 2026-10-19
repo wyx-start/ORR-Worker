@@ -12,6 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from background_ph import (activate_ph_links, finite_ph, synchronize_ph_links)
+from background_pairing import apply_background_binding
 
 from orr_core import (DataError, VERSION, default_config, json_bytes, parameter_record,
                       parse_chi, process_trace, scan_segments, select_segment)
@@ -42,11 +43,16 @@ def invalidate():
     st.session_state.settings.get("plot", {}).pop("smoothing_report", None)
 
 
-def clear_polarization_exports():
+def clear_polarization_exports(channel="disk"):
     # Display changes must not invalidate K–L or RRDE calculations.
-    for name in ("polarization.png", "polarization.svg", "polarization_data.csv", "parameters.json"):
+    names = (("polarization.png", "polarization.svg", "polarization_data.csv", "parameters.json") if channel == "disk"
+             else ("ring_current.png", "ring_current.svg", "ring_current_data.csv", "ring_current_parameters.json"))
+    for name in names:
         st.session_state.exports.pop(name, None)
-    st.session_state.settings.get("plot", {}).pop("smoothing_report", None)
+    st.session_state.exports.pop("parameters.json", None)
+    st.session_state.settings.get("plot" if channel == "disk" else "ring_plot", {}).pop("smoothing_report", None)
+    if channel == "ring":
+        st.session_state.settings.get("ring_plot", {}).pop("comparison_audit", None)
 
 
 @st.cache_data(max_entries=40, show_spinner=False)
@@ -80,7 +86,7 @@ def label(ident):
 def file_formatter(empty_label="不扣除"):
     # A stable snapshot also works when Streamlit deserializes widget options off-thread.
     labels = {ident:trace.name + " · " + ident[:4] for ident, trace in st.session_state.traces.items()}
-    return lambda ident: empty_label if ident is None else labels.get(ident, str(ident))
+    return lambda ident: empty_label if ident in (None, "") else labels.get(ident, str(ident))
 
 
 def require_files():
@@ -89,7 +95,7 @@ def require_files():
         st.stop()
 
 
-def process_all(axis=None):
+def process_all(axis=None, channels="all", subtract_background=True):
     axis = axis or st.session_state.settings.get("axis", "RHE")
     outputs, errors = {}, []
     for ident, trace in st.session_state.traces.items():
@@ -97,7 +103,8 @@ def process_all(axis=None):
         if cfg.get("role") == "背景":
             continue
         try:
-            outputs[ident] = process_trace(trace, cfg, st.session_state.traces, st.session_state.configs, axis)
+            outputs[ident] = process_trace(trace, cfg, st.session_state.traces, st.session_state.configs, axis,
+                                           channels=channels, subtract_background=subtract_background)
         except (DataError, ValueError, TypeError, IndexError) as exc:
             errors.append({"文件": trace.name, "原因": str(exc)})
     return outputs, errors
@@ -256,10 +263,23 @@ def per_file_form():
             st.dataframe(pd.DataFrame(segments), hide_index=True)
         else:
             updates["manual_segment"] = None
-        backgrounds = [None] + [i for i in ids if i != ident and st.session_state.configs[i].get("role")=="背景"]
-        updates["background_disk"] = st.selectbox("盘背景", backgrounds,
+        # A concrete empty option avoids None being interpreted as an unset
+        # widget value and restored to its previous nonempty default on rerun.
+        backgrounds = [""] + [i for i in ids if i != ident and st.session_state.configs[i].get("role")=="背景"]
+        paired = False
+        if multi and cfg.get("role") != "背景":
+            mode = st.selectbox("背景模式", ["盘环配对背景", "分别指定背景"],
+                index=0 if cfg.get("background_mode") == "paired" else 1,
+                key=prefix+"background_mode", persist_state="session")
+            paired = mode == "盘环配对背景"
+        updates["background_mode"] = "paired" if paired else "independent"
+        updates["background_disk"] = st.selectbox("盘环配对背景文件" if paired else "盘背景", backgrounds,
             index=backgrounds.index(cfg.get("background_disk")) if cfg.get("background_disk") in backgrounds else 0,
-            format_func=file_formatter(), key=prefix+"bg_disk", persist_state="session")
+            format_func=file_formatter(), key=prefix+"bg_disk", persist_state="session") or None
+        if paired:
+            updates["background_ring"] = updates["background_disk"]
+            st.caption("应用后同时更新盘、环背景：样品盘扣背景盘，样品环扣背景环；按各文件通道映射，不按列号猜测。")
+            st.caption(f"当前已应用：盘={file_formatter()(cfg.get('background_disk'))}；环={file_formatter()(cfg.get('background_ring'))}。")
         st.caption("提交新背景关联后，默认沿用样品已应用的 pH；已有独立 pH 保留并核对差异。")
         if multi:
             with st.expander("高级：盘环通道与符号"):
@@ -267,18 +287,20 @@ def per_file_form():
                 disk = st.selectbox("盘 / 主电流通道", channels,
                     index=channels.index(cfg.get("disk_channel")) if cfg.get("disk_channel") in channels else 0,
                     format_func=lambda v:trace.columns[v+1], key=prefix+"disk", persist_state="session")
-                options = [None] + channels
+                options = [-1] + channels
                 ring = st.selectbox("环电流通道", options,
                     index=options.index(cfg.get("ring_channel")) if cfg.get("ring_channel") in options else 0,
-                    format_func=lambda v:"无" if v is None else trace.columns[v+1], key=prefix+"ring", persist_state="session")
+                    format_func=lambda v:"无" if v == -1 else trace.columns[v+1], key=prefix+"ring", persist_state="session")
+                ring = None if ring == -1 else ring
                 updates.update(disk_channel=disk, ring_channel=ring)
                 updates["disk_sign"] = st.selectbox("盘还原电流的符号", [-1, 1], index=0 if cfg.get("disk_sign", -1)==-1 else 1,
                     format_func=lambda v:"负" if v==-1 else "正", key=prefix+"disk_sign", persist_state="session")
                 updates["ring_sign"] = st.selectbox("环氧化电流的符号", [1, -1], index=0 if cfg.get("ring_sign", 1)==1 else 1,
                     format_func=lambda v:"正" if v==1 else "负", key=prefix+"ring_sign", persist_state="session")
-            updates["background_ring"] = st.selectbox("环背景（单列背景按其唯一电流列）", backgrounds,
-                index=backgrounds.index(cfg.get("background_ring")) if cfg.get("background_ring") in backgrounds else 0,
-                format_func=file_formatter(), key=prefix+"bg_ring", persist_state="session")
+            if not paired:
+                updates["background_ring"] = st.selectbox("环背景（单列背景按其唯一电流列）", backgrounds,
+                    index=backgrounds.index(cfg.get("background_ring")) if cfg.get("background_ring") in backgrounds else 0,
+                    format_func=file_formatter(), key=prefix+"bg_ring", persist_state="session") or None
             with st.expander("环检测条件（实验核对）"):
                 updates["ring_material"] = st.text_input("环材质（选填记录）", cfg.get("ring_material", ""), key=prefix+"material", persist_state="session")
                 updates["ring_potential_V"] = st.number_input("环固定电位 / V（相对本文件原参比）", value=cfg.get("ring_potential_V"),
@@ -301,9 +323,16 @@ def per_file_form():
             if updates.get("ring_channel") is not None and updates["ring_channel"] == updates["disk_channel"]:
                 st.error("盘、环不能使用同一个通道。")
             else:
+                candidate = dict(cfg, **updates)
+                try:
+                    apply_background_binding(ident, candidate, st.session_state.traces, st.session_state.configs,
+                        updates["background_mode"], updates.get("background_disk"), updates.get("background_ring"))
+                except DataError as exc:
+                    st.error(str(exc))
+                    return
                 changed_records = [field for field in ("ring_material", "ring_potential_V")
                                    if field in updates and cfg.get(field) != updates[field]]
-                cfg.update(updates, background_reviewed=True)
+                cfg.update(candidate)
                 activate_ph_links(st.session_state.configs, [updates.get("background_disk"), updates.get("background_ring")])
                 sources = cfg.setdefault("parameter_sources", {})
                 for field in changed_records:

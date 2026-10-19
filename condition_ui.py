@@ -123,7 +123,7 @@ def _include_background_targets(target_key, background_ids):
     st.session_state[target_key] = list(dict.fromkeys(list(st.session_state.get(target_key, [])) + background_ids))
 
 
-def common_parameter_form(purpose="curves", ids=None, density=False, expanded=False):
+def common_parameter_form(purpose="curves", ids=None, density=False, expanded=False, channels="all", subtract_background=True):
     """Show only the inputs needed by this page; stage edits until Apply."""
     allowed_ids = list(st.session_state.traces)
     ids = list(ids) if ids is not None else [i for i in allowed_ids if st.session_state.configs[i].get("role") != "背景"]
@@ -132,6 +132,13 @@ def common_parameter_form(purpose="curves", ids=None, density=False, expanded=Fa
     if not ids:
         return
     axis = st.session_state.settings.get("axis", "RHE")
+    def relevant_backgrounds(config):
+        if not subtract_background:
+            return []
+        if channels == "ring":
+            bgid = config.get("background_ring")
+            return [bgid] if bgid in st.session_state.configs else []
+        return linked_backgrounds(config, st.session_state.configs)
     st.subheader("当前实验条件")
     notice = st.session_state.pop("conditions_notice", None)
     if notice:
@@ -143,7 +150,7 @@ def common_parameter_form(purpose="curves", ids=None, density=False, expanded=Fa
         issues = missing_conditions(cfg, purpose, axis, density)
         has_potential_issue |= bool(missing_conditions(cfg, "curves", axis))
         background_details = []
-        for bgid in linked_backgrounds(cfg, st.session_state.configs):
+        for bgid in relevant_backgrounds(cfg):
             bgcfg = st.session_state.configs[bgid]
             background_details.append(f"{st.session_state.traces[bgid].name}：{bgcfg.get('background_ph_detail', 'pH 独立设置')}")
             bg_issues = missing_conditions(st.session_state.configs[bgid], "curves", axis)
@@ -179,14 +186,14 @@ def common_parameter_form(purpose="curves", ids=None, density=False, expanded=Fa
             format_func=file_formatter(), key=target_key, persist_state="session")
         st.caption(f"本次应用范围：{len(targets)} 个文件。跨组和背景文件请在上方明确选入。")
         background_ids = list(dict.fromkeys(bgid for ident in targets
-            for bgid in linked_backgrounds(st.session_state.configs[ident], st.session_state.configs) if bgid not in targets))
+            for bgid in relevant_backgrounds(st.session_state.configs[ident]) if bgid not in targets))
         if background_ids:
             names = "、".join(st.session_state.traces[i].name for i in background_ids)
             st.info(f"关联背景：{names}。背景 pH 按其当前模式联动或独立保存。若其他实验条件也相同，可加入范围后一并应用；参比等不同则单独设置。")
             st.button("将关联背景加入应用范围", key=f"include_backgrounds_{purpose}",
                 on_click=_include_background_targets, args=(target_key, background_ids))
         all_backgrounds = list(dict.fromkeys(bgid for ident in targets
-            for bgid in linked_backgrounds(st.session_state.configs[ident], st.session_state.configs)))
+            for bgid in relevant_backgrounds(st.session_state.configs[ident])))
         if is_background:
             all_backgrounds = [source]
         background_ph_panel(all_backgrounds, f"conditions_ph_{purpose}_{source}")
@@ -240,8 +247,9 @@ def common_parameter_form(purpose="curves", ids=None, density=False, expanded=Fa
         with st.expander("补充实验记录（选填）"):
             electrolyte = st.text_input("电解液、浓度与气氛", value=cfg.get("electrolyte", ""),
                 placeholder="例如 O₂ 饱和 0.1 M NaOH", key=prefix+"electrolyte", persist_state="session")
-            if electrolyte != cfg.get("electrolyte", ""):
-                values["electrolyte"] = electrolyte
+            # Apply the displayed source condition to every explicitly selected
+            # target, even when the source text itself was not edited.
+            values["electrolyte"] = electrolyte
             st.json({"参数来源":cfg.get("parameter_sources", {}), "当前盘面积_cm2":cfg.get("area_cm2")})
         pending = unapplied_changes(cfg, values)
         if pending:

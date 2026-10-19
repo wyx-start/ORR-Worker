@@ -20,6 +20,22 @@ class AppTests(unittest.TestCase):
     def assert_clean(self, at):
         self.assertEqual(len(at.exception), 0, str([e.value for e in at.exception]))
 
+    def test_batch_apply_copies_unchanged_source_electrolyte(self):
+        at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
+        widget(at.button, "载入四份示例").click().run()
+        widget(at.button, "先查看原始电位曲线").click().run()
+        source = widget(at.selectbox, "读取设置的文件").value
+        targets = widget(at.multiselect, "应用到文件（默认当前组，可加入背景或其他文件）").value
+        self.assertEqual(len(targets), 2)
+        at.session_state.configs[source]["electrolyte"] = "O2 saturated test electrolyte"
+        at.session_state.revision += 1
+        at.run()
+        self.assertEqual(widget(at.text_input, "电解液、浓度与气氛").value, "O2 saturated test electrolyte")
+        widget(at.button, "应用实验参数").click().run()
+        self.assert_clean(at)
+        for ident in targets:
+            self.assertEqual(at.session_state.configs[ident]["electrolyte"], "O2 saturated test electrolyte")
+
     def test_full_workflow(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
         self.assert_clean(at)
@@ -49,6 +65,8 @@ class AppTests(unittest.TestCase):
         widget(at.button, "计算 K–L").click().run()
         self.assert_clean(at)
         self.assertIn("kl", at.session_state.results)
+        self.assertEqual(at.session_state.results["kl"]["params"]["units"]["C"], "mol/cm³")
+        self.assertEqual(at.session_state.results["kl"]["params"]["axis"], "RHE")
         at.switch_page("app_pages/rrde.py").run()
         self.assert_clean(at)
         self.assertIn("rrde_results.csv", at.session_state.exports)
@@ -79,6 +97,27 @@ class AppTests(unittest.TestCase):
         at.switch_page("app_pages/export.py").run()
         self.assert_clean(at)
         self.assertIn("parameters.json", at.session_state.exports)
+
+    def test_failed_kl_recalculation_clears_prior_result_and_exports(self):
+        at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
+        widget(at.button, "载入四份示例").click().run()
+        widget(at.button, "先查看原始电位曲线").click().run()
+        at.switch_page("app_pages/kl.py").run()
+        widget(at.number_input, "氧浓度 C / mol·cm⁻³ *").set_value(1.2e-6)
+        widget(at.number_input, "扩散系数 D / cm²·s⁻¹ *").set_value(1.9e-5)
+        widget(at.number_input, "运动黏度 ν / cm²·s⁻¹ *").set_value(.01)
+        widget(at.checkbox, "已核对：各文件属于同一电极和相同实验条件，以上物性参数适用").check()
+        widget(at.button, "计算 K–L").click().run()
+        self.assert_clean(at)
+        self.assertIn("kl", at.session_state.results)
+        self.assertIn("kl_results.csv", at.session_state.exports)
+        self.assertTrue(any("不满足两路径模型检查" in e.value for e in at.warning))
+        widget(at.checkbox, "已核对：各文件属于同一电极和相同实验条件，以上物性参数适用").uncheck()
+        widget(at.button, "计算 K–L").click().run()
+        self.assert_clean(at)
+        self.assertNotIn("kl", at.session_state.results)
+        self.assertFalse(any(name.startswith("kl_") for name in at.session_state.exports))
+        self.assertTrue(any("请先核对" in e.value for e in at.error))
 
     def test_missing_parameters_reported_without_crash(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()

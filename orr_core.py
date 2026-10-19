@@ -15,7 +15,7 @@ from background_ph import default_ph_link, ph_link_error, resolved_configs
 import numpy as np
 import pandas as pd
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 FARADAY = 96485.33212
 GAS_CONSTANT = 8.314462618
 SOURCES = {
@@ -348,6 +348,7 @@ def default_config(trace: Trace) -> dict:
                 reference_source="用户输入", reference_preset_C=None,
                 pH=None, temperature_C=25., rhe_offset_V=None, electrolyte="",
                 background_disk=None, background_ring=None, background_reviewed=False,
+                background_mode="paired" if role == "RRDE" else "independent",
                 ir_enabled=False, ir_ohm=0., ir_confirmed=False,
                 ring_potential_V=trace.header.get("2nd E (V)"), ring_material="",
                 ring_detection_confirmed=False)
@@ -387,7 +388,7 @@ def potential_signature(cfg, axis):
     return ("原始", cfg.get("reference"), cfg.get("filling"), cfg.get("temperature_C"), cfg.get("ref_V_SHE"))
 
 
-def base_curve(trace, cfg, axis="RHE", direction=None):
+def base_curve(trace, cfg, axis="RHE", direction=None, require_disk=True):
     selection_cfg = dict(cfg)
     if direction is not None:
         selection_cfg["direction"] = direction
@@ -395,10 +396,15 @@ def base_curve(trace, cfg, axis="RHE", direction=None):
     if direction is not None and segment["direction"] != direction:
         raise DataError("背景手选段与样品方向不同，请重新选段。")
     rows = trace.values[segment["start"]:segment["end"]+1]
-    disk_channel = int(cfg.get("disk_channel", 0))
-    if not 0 <= disk_channel < rows.shape[1] - 1:
-        raise DataError("盘电流通道无效。")
-    raw_disk = rows[:, disk_channel + 1]
+    raw_disk = None
+    if require_disk or cfg.get("ir_enabled"):
+        try:
+            disk_channel = int(cfg.get("disk_channel", 0))
+            if not 0 <= disk_channel < rows.shape[1] - 1:
+                raise ValueError
+        except (ValueError, TypeError):
+            raise DataError("盘电流通道无效；启用 iR 时需要原始盘电流。") from None
+        raw_disk = rows[:, disk_channel + 1]
     e = rows[:, 0].copy()
     if cfg.get("ir_enabled"):
         if not cfg.get("ir_confirmed"):
@@ -424,10 +430,12 @@ def interpolate(x, y, target):
     return np.interp(target, frame.index.to_numpy(), frame.to_numpy(), left=np.nan, right=np.nan)
 
 
-def process_trace(trace, cfg, traces, configs, axis="RHE"):
+def process_trace(trace, cfg, traces, configs, axis="RHE", channels="all", subtract_background=True):
+    if channels not in ("all", "disk", "ring"):
+        raise DataError("无效的处理通道。")
     configs = resolved_configs({**configs, trace.id:cfg}, {k:t.name for k,t in traces.items()})
     cfg = configs[trace.id]
-    rows, e, disk, segment = base_curve(trace, cfg, axis)
+    rows, e, disk, segment = base_curve(trace, cfg, axis, require_disk=channels != "ring")
     notes = list(trace.warnings)
     if cfg.get("manual_segment"):
         notes.append("采用人工指定扫描段；完整性由用户核对。")
@@ -436,21 +444,28 @@ def process_trace(trace, cfg, traces, configs, axis="RHE"):
     if axis == "原始" and cfg.get("reference") == "未设置" and cfg.get("potential_method") != "已是 RHE":
         notes.append("原始参比身份未设置，当前横坐标仅为文件原始电位。")
     result = pd.DataFrame({"row_1based": np.arange(segment["start"]+1, segment["end"]+2),
-                           "E_original_V": rows[:, 0], "E_V": e, "I_disk_raw_A": disk})
+                           "E_original_V": rows[:, 0], "E_V": e})
+    if disk is not None:
+        result["I_disk_raw_A"] = disk
+    if channels == "ring":
+        disk = None  # iR may have used raw disk, but do not process its background.
     ring_channel = cfg.get("ring_channel")
     ring = None
-    if ring_channel is not None:
+    if channels != "disk" and ring_channel is not None:
         ring_channel = int(ring_channel)
-        if ring_channel == int(cfg.get("disk_channel", 0)) or not 0 <= ring_channel < rows.shape[1]-1:
+        if ring_channel == cfg.get("disk_channel", 0) or not 0 <= ring_channel < rows.shape[1]-1:
             raise DataError("盘、环必须对应不同且有效的通道。")
         ring = rows[:, ring_channel+1]
         result["I_ring_raw_A"] = ring
+    if channels == "ring" and ring is None:
+        raise DataError("没有有效的环电流通道。")
     for label, current in (("disk", disk), ("ring", ring)):
         if current is None:
             continue
-        bgid = cfg.get(f"background_{label}")
+        bgid = cfg.get(f"background_{label}") if subtract_background else None
+        result[f"{label}_background_status"] = "未参与" if not subtract_background else ("已扣除" if bgid else "未绑定")
         if not bgid:
-            result[f"I_{label}_background_A"] = 0.
+            result[f"I_{label}_background_A"] = np.nan if channels == "ring" else 0.
             result[f"I_{label}_A"] = current
             notes.append(f"{'盘' if label == 'disk' else '环'}电流未扣背景。")
             continue
@@ -465,24 +480,27 @@ def process_trace(trace, cfg, traces, configs, axis="RHE"):
         if potential_signature(cfg, axis) != potential_signature(bgcfg, axis):
             raise DataError("样品与背景原始参比不一致；请统一换算到 RHE 后再扣除。")
         try:
-            b_rows, b_e, _, b_seg = base_curve(bg, bgcfg, axis, direction=segment["direction"])
+            b_rows, b_e, _, b_seg = base_curve(bg, bgcfg, axis, direction=segment["direction"], require_disk=label == "disk")
         except (DataError, ValueError, TypeError, IndexError) as exc:
             background_label = "盘背景" if label == "disk" else "环背景"
             raise DataError(f"{background_label}“{bg.name}”：{exc} 请检查该背景文件的已应用实验条件与扫描设置。") from exc
         channel = bgcfg.get(f"{label}_channel")
         if channel is None and b_rows.shape[1] == 2:
             channel = 0
-        if channel is None:
-            raise DataError("背景没有指定对应电流通道。")
+        if channel is None or not 0 <= int(channel) < b_rows.shape[1]-1:
+            raise DataError(f"{'盘' if label == 'disk' else '环'}背景“{bg.name}”没有指定有效的对应电流通道。")
         # Convert the background to the sample's current-sign convention before subtraction.
         source_sign = bgcfg.get(f"{label}_sign", 1 if label == "ring" else -1)
         if label == "ring" and b_rows.shape[1] == 2:
             source_sign = bgcfg.get("ring_sign", 1)
         target_sign = cfg.get(f"{label}_sign", 1 if label == "ring" else -1)
+        if source_sign not in (-1, 1) or target_sign not in (-1, 1):
+            raise DataError(f"{'盘' if label == 'disk' else '环'}电流符号必须为 +1 或 −1，请核对样品与背景“{bg.name}”。")
         b_i = b_rows[:, int(channel)+1] * source_sign / target_sign
         background = interpolate(b_e, b_i, e)
         result[f"I_{label}_background_A"] = background
         result[f"I_{label}_A"] = current - background
+        result.loc[~np.isfinite(background), f"{label}_background_status"] = "未覆盖，不外推"
         missing = int(np.isnan(background).sum())
         if missing:
             notes.append(f"{'盘' if label == 'disk' else '环'}背景未覆盖 {missing} 个点，这些点不外推、不参与计算。")
@@ -493,7 +511,7 @@ def process_trace(trace, cfg, traces, configs, axis="RHE"):
             if cfg.get(key) != bgcfg.get(key):
                 notes.append(f"背景的 {key} 与样品不同，请核对实验条件。")
     area = cfg.get("area_cm2")
-    if area is not None:
+    if area is not None and "I_disk_A" in result:
         try:
             area = require_number(area, "盘面积（cm²）", positive=True)
             result["j_disk_mA_cm2"] = result["I_disk_A"] * 1000 / area
@@ -501,9 +519,15 @@ def process_trace(trace, cfg, traces, configs, axis="RHE"):
             # Area is irrelevant to current plots and RRDE ratios. Density and
             # K–L still require a valid area at their own calculation boundary.
             notes.append(f"{exc} 当前仍可使用电流；电流密度和 K–L 需要修正面积。")
-    result["I_disk_mA"] = result["I_disk_A"] * 1000
+    if "I_disk_A" in result:
+        result["I_disk_mA"] = result["I_disk_A"] * 1000
+    if "I_ring_A" in result:
+        result["I_ring_mA"] = result["I_ring_A"] * 1000
+        result["I_ring_uA"] = result["I_ring_A"] * 1e6
     return {"data": result, "segment": segment, "notes": list(dict.fromkeys(notes)), "axis": axis,
-            "config": dict(cfg), "name": trace.name, "sha256": trace.sha256}
+            "config": dict(cfg), "name": trace.name, "sha256": trace.sha256,
+            "scan_rate_V_s":trace.header.get("Scan Rate (V/s)"),
+            "processing":dict(channels=channels, subtract_background=subtract_background)}
 
 
 def rrde_calculate(processed, cfg, floor_A=1e-9):
@@ -647,6 +671,8 @@ def unpack_project(raw):
                 if not isinstance(entry["config"], dict):
                     raise DataError("项目参数结构不正确。")
                 defaults.update({k:v for k,v in entry["config"].items() if k in defaults})
+                if "background_mode" not in entry["config"]:
+                    defaults["background_mode"] = "independent"
                 if "background_ph_mode" not in entry["config"]:
                     # Existing values and empty records remain independent until
                     # a user explicitly enables following or confirms a binding.
@@ -685,4 +711,5 @@ def parameter_record(traces, configs, settings, processed=None):
                 files=[dict(id=k, filename=t.name, sha256=t.sha256, columns=t.columns, encoding=t.encoding,
                             header=t.header, config=configs[k],
                             selected_segment=(processed or {}).get(k, {}).get("segment"),
+                            processing=(processed or {}).get(k, {}).get("processing"),
                             notes=(processed or {}).get(k, {}).get("notes", [])) for k,t in traces.items()])
