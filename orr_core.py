@@ -15,7 +15,7 @@ from background_ph import default_ph_link, ph_link_error, resolved_configs
 import numpy as np
 import pandas as pd
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 FARADAY = 96485.33212
 GAS_CONSTANT = 8.314462618
 SOURCES = {

@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 import zipfile
+from copy import deepcopy
 
 import matplotlib
 matplotlib.use("Agg")
@@ -33,6 +34,187 @@ def initialize():
                 "common_defaults": {}}
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
+    from settings_draft import new_draft
+    st.session_state.setdefault("settings_draft", new_draft(st.session_state.revision))
+    st.session_state.setdefault("draft_epoch", 0)
+    st.session_state.setdefault("workspace_epoch", 0)
+
+
+def _overlay(base, patch):
+    result = deepcopy(base)
+    for key, value in patch.items():
+        result[key] = _overlay(result.get(key, {}), value) if isinstance(value, dict) else deepcopy(value)
+    return result
+
+
+def _difference(value, base):
+    result = {}
+    for key, item in value.items():
+        if isinstance(item, dict):
+            nested = _difference(item, base.get(key, {}) if isinstance(base.get(key), dict) else {})
+            if nested:
+                result[key] = nested
+        elif item != base.get(key):
+            result[key] = deepcopy(item)
+    return result
+
+
+def get_draft_configs():
+    from settings_draft import candidate
+    try:
+        configs, _ = candidate(st.session_state.settings_draft, st.session_state.traces,
+            st.session_state.configs, st.session_state.settings, st.session_state.revision)
+        return configs
+    except (DataError, ValueError, TypeError, IndexError):
+        # Invalid edits must remain visible and repairable; processing still uses
+        # pending_candidate(), which refuses them instead of this UI fallback.
+        pass
+    result = deepcopy(st.session_state.configs)
+    for records in st.session_state.settings_draft.get("configs", {}).values():
+        for ident, patch in records.items():
+            if ident in result:
+                result[ident] = _overlay(result[ident], patch)
+    return result
+
+
+def get_draft_settings():
+    result = deepcopy(st.session_state.settings)
+    for patch in st.session_state.settings_draft.get("settings", {}).values():
+        result = _overlay(result, patch)
+    return result
+
+
+def has_draft():
+    from settings_draft import has_changes
+    return has_changes(st.session_state.settings_draft) or bool(st.session_state.get("draft_error"))
+
+
+def _draft_error_summary():
+    errors = st.session_state.get("draft_errors", {})
+    if errors:
+        st.session_state.draft_error = "；".join(errors.values())
+    else:
+        st.session_state.pop("draft_error", None)
+
+
+def stage_config_updates(domain, updates_by_id, _retry=True):
+    from settings_draft import stage_config
+    draft = deepcopy(st.session_state.settings_draft)
+    try:
+        for ident, updates in updates_by_id.items():
+            old = draft.get("configs", {}).get(domain, {}).pop(ident, {})
+            patch = _difference(_overlay(old, updates), st.session_state.configs[ident])
+            if patch:
+                stage_config(draft, domain, ident, patch)
+        st.session_state.settings_draft = draft
+        st.session_state.setdefault("draft_errors", {}).pop(domain, None)
+        st.session_state.setdefault("rejected_config_edits", {}).pop(domain, None)
+        _draft_error_summary()
+        if _retry:
+            for rejected_domain, values in list(st.session_state.get("rejected_config_edits", {}).items()):
+                stage_config_updates(rejected_domain, values, _retry=False)
+        return True
+    except (DataError, ValueError, TypeError) as exc:
+        st.session_state.setdefault("draft_errors", {})[domain] = str(exc)
+        st.session_state.setdefault("rejected_config_edits", {})[domain] = deepcopy(updates_by_id)
+        _draft_error_summary()
+        return False
+
+
+def stage_settings_updates(domain, updates):
+    from settings_draft import stage_settings
+    draft = deepcopy(st.session_state.settings_draft)
+    try:
+        old = draft.get("settings", {}).pop(domain, {})
+        patch = _difference(_overlay(old, updates), st.session_state.settings)
+        if patch:
+            stage_settings(draft, domain, patch)
+        st.session_state.settings_draft = draft
+        st.session_state.setdefault("draft_errors", {}).pop(domain, None)
+        _draft_error_summary()
+    except (DataError, ValueError, TypeError) as exc:
+        st.session_state.setdefault("draft_errors", {})[domain] = str(exc)
+        _draft_error_summary()
+
+
+def pending_candidate():
+    from settings_draft import candidate
+    if st.session_state.get("draft_error"):
+        raise DataError(st.session_state.draft_error)
+    if not has_draft():
+        return deepcopy(st.session_state.configs), deepcopy(st.session_state.settings)
+    return candidate(st.session_state.settings_draft, st.session_state.traces,
+                     st.session_state.configs, st.session_state.settings, st.session_state.revision)
+
+
+def apply_pending_settings(preflight=None):
+    """Validate one immutable candidate, then commit both configs and settings."""
+    if not has_draft() and not st.session_state.get("draft_error"):
+        return True
+    configs, settings = pending_candidate()
+    if preflight is not None:
+        preflight(configs, settings)
+    st.session_state.configs = configs
+    st.session_state.settings = settings
+    invalidate()
+    st.session_state.settings_notice = "设置已应用；受影响的分析结果需重新计算。"
+    return True
+
+
+def apply_settings_button(key="shared_apply"):
+    if st.session_state.get("settings_notice"):
+        st.success(st.session_state.pop("settings_notice"))
+    if st.session_state.get("draft_error"):
+        st.error(st.session_state.draft_error)
+    dirty = has_draft() or bool(st.session_state.get("draft_error"))
+    if dirty:
+        st.info("有未应用修改：应用范围见下方。计算、导出或保存项目时也可合并应用。")
+        with st.expander("查看本次修改与目标文件"):
+            draft = st.session_state.settings_draft
+            rows = [{"来源":domain, "文件":label(ident), "修改字段":"、".join(patch)}
+                    for domain, records in draft.get("configs", {}).items()
+                    for ident, patch in records.items() if patch]
+            if rows:
+                st.dataframe(pd.DataFrame(rows), hide_index=True)
+            if draft.get("settings"):
+                st.write("全局设置", draft["settings"])
+        with st.container(horizontal=True):
+            if st.button("应用设置", type="primary", key=key):
+                try:
+                    apply_pending_settings()
+                    st.rerun()
+                except (DataError, ValueError, TypeError) as exc:
+                    st.error(str(exc))
+            if st.button("放弃未应用修改", key=key+"_discard"):
+                reset_draft()
+                st.rerun()
+    else:
+        st.caption(f"已应用 · 配置修订 {st.session_state.revision} · {st.session_state.settings.get('axis', 'RHE')} 电位坐标")
+
+
+def reset_draft():
+    from settings_draft import new_draft
+    st.session_state.settings_draft = new_draft(st.session_state.revision)
+    st.session_state.draft_epoch = st.session_state.get("draft_epoch", 0)+1
+    st.session_state.pop("draft_error", None)
+    st.session_state.pop("draft_errors", None)
+    st.session_state.pop("rejected_config_edits", None)
+
+
+def process_selected(ids, configs=None, settings=None, channels="all", subtract_background=True):
+    configs = configs if configs is not None else st.session_state.configs
+    settings = settings if settings is not None else st.session_state.settings
+    outputs, errors = {}, []
+    for ident in ids:
+        if ident not in configs or configs[ident].get("role") == "背景":
+            continue
+        try:
+            outputs[ident] = process_trace(st.session_state.traces[ident], configs[ident],
+                st.session_state.traces, configs, settings.get("axis", "RHE"),
+                channels=channels, subtract_background=subtract_background)
+        except (DataError, ValueError, TypeError, IndexError) as exc:
+            errors.append({"文件":st.session_state.traces[ident].name, "原因":str(exc)})
+    return outputs, errors
 
 
 def invalidate():
@@ -41,12 +223,13 @@ def invalidate():
     st.session_state.results = {}
     st.session_state.exports = {}
     st.session_state.settings.get("plot", {}).pop("smoothing_report", None)
+    reset_draft()
 
 
 def clear_polarization_exports(channel="disk"):
     # Display changes must not invalidate K–L or RRDE calculations.
-    names = (("polarization.png", "polarization.svg", "polarization_data.csv", "parameters.json") if channel == "disk"
-             else ("ring_current.png", "ring_current.svg", "ring_current_data.csv", "ring_current_parameters.json"))
+    names = (("polarization.png", "polarization.svg", "polarization_data.csv", "polarization_plot.csv", "parameters.json") if channel == "disk"
+             else ("ring_current.png", "ring_current.svg", "ring_current_data.csv", "ring_current_plot.csv", "ring_current_parameters.json"))
     for name in names:
         st.session_state.exports.pop(name, None)
     st.session_state.exports.pop("parameters.json", None)
@@ -61,6 +244,8 @@ def cached_parse(name, raw):
 
 
 def add_files(files):
+    if has_draft() or st.session_state.get("draft_error"):
+        raise DataError("有未应用修改。请先应用或放弃草稿，再导入新文件；现有草稿已保留。")
     errors = []
     added = 0
     for name, raw in files:
@@ -172,9 +357,6 @@ def figure_bytes(fig):
 def offer_figure(fig, name):
     png, svg = figure_bytes(fig)
     st.image(png, width="stretch")
-    with st.container(horizontal=True):
-        st.download_button("PNG · 300 dpi", png, f"{name}.png", "image/png", key=f"png_{name}")
-        st.download_button("SVG · 矢量图", svg, f"{name}.svg", "image/svg+xml", key=f"svg_{name}")
     set_export(f"{name}.png", png, "image/png")
     set_export(f"{name}.svg", svg, "image/svg+xml")
 
@@ -189,176 +371,14 @@ def axis_label(outputs):
     return "E / V (original reference)"
 
 
-def background_ph_panel(background_ids, prefix):
-    """Explicit controls for one physical background, shared by its samples."""
-    for ident in dict.fromkeys(background_ids):
-        if ident not in st.session_state.configs:
-            continue
-        cfg = st.session_state.configs[ident]
-        with st.expander(f"背景 pH：{st.session_state.traces[ident].name}",
-                         key=f"background_ph_panel_{prefix}_{ident}", on_change="rerun"):
-            detail = cfg.get("background_ph_detail", "尚未关联样品")
-            if cfg.get("background_ph_status") in ("conflict", "manual_difference", "invalid"):
-                st.warning(detail)
-            else:
-                st.caption(detail)
-            sources = cfg.get("background_ph_sources", [])
-            if sources:
-                st.dataframe(pd.DataFrame([{"关联样品":s["filename"], "已应用 pH":s["pH"]} for s in sources]), hide_index=True)
-            st.caption("此模式作用于这一个背景文件及所有使用它的样品。仅 pH 联动；参比与温度等条件仍独立保存。")
-            key = f"{prefix}_{ident}_{st.session_state.revision}_"
-            options = ["跟随关联样品（默认）", "独立填写背景 pH"]
-            mode = st.selectbox("背景 pH 模式", options,
-                index=1 if cfg.get("background_ph_mode") == "manual" else 0,
-                key=key+"mode", persist_state="session")
-            manual = mode == options[1]
-            value = None
-            if manual:
-                value = st.number_input("背景独立 pH（允许 0）", value=finite_ph(cfg.get("pH")),
-                    step=.1, format="%.3f", key=key+"value", persist_state="session")
-            if st.button("应用背景 pH 设置", key=key+"apply"):
-                cfg.update(background_ph_mode="manual" if manual else "follow", background_ph_legacy=False)
-                if manual:
-                    cfg["pH"] = value
-                    cfg.setdefault("parameter_sources", {})["pH"] = "人工独立填写背景 pH"
-                st.session_state.conditions_notice = "已应用背景 pH 设置；关联状态已重新核对。"
-                invalidate()
-                st.rerun()
+def background_ph_panel(background_ids, prefix="shared"):
+    from settings_editor import background_ph_panel as render
+    return render(background_ids, prefix)
 
 
 def per_file_form():
-    st.subheader("扫描、通道与背景")
-    ids = list(st.session_state.traces)
-    ident = st.selectbox("要检查的文件", ids, format_func=file_formatter(), key="detail_file")
-    trace, cfg = st.session_state.traces[ident], st.session_state.configs[ident]
-    prefix = f"detail_{ident}_{st.session_state.revision}_"
-    multi = len(trace.columns) >= 3
-    try:
-        segments = scan_segments(trace)
-    except DataError as exc:
-        st.error(str(exc))
-        return
-    try:
-        selected = select_segment(trace, cfg)
-        st.caption(f"当前：{cfg.get('mode', 'A')} 模式 · 电位{selected['direction']} · 第 {selected['segment']} 段 · {selected['points']} 点。")
-    except DataError as exc:
-        selected = None
-        st.warning(str(exc))
-    st.caption(f"盘通道 {cfg.get('disk_channel', 0)+1}" +
-               (f" / 环通道 {cfg.get('ring_channel')+1 if cfg.get('ring_channel') is not None else '未设置'}；通道为建议，请核对接线。" if multi else " · 单电流通道。"))
-    with st.expander("修改扫描、通道与背景", key=f"scan_editor_{ident}", on_change="rerun"):
-        updates = {}
-        updates["mode"] = st.selectbox("自动选择规则", ["A", "B"], index=0 if cfg.get("mode", "A")=="A" else 1,
-            format_func=lambda m: "A · 最后完整循环内的支线" if m=="A" else "B · 最后完整单向支线",
-            key=prefix+"mode", persist_state="session")
-        updates["direction"] = st.selectbox("电位方向", ["递减", "递增"], index=0 if cfg.get("direction")=="递减" else 1,
-            key=prefix+"direction", persist_state="session")
-        manual_enabled = st.toggle("人工选择扫描段", value=cfg.get("manual_segment") is not None or selected is None,
-            key=prefix+"manual_enabled", persist_state="session")
-        if manual_enabled:
-            choices = [s["segment"] for s in segments]
-            updates["manual_segment"] = st.selectbox("人工指定扫描段", choices,
-                index=choices.index(cfg.get("manual_segment")) if cfg.get("manual_segment") in choices else len(choices)-1,
-                format_func=lambda v: f"第 {v} 段（可选择不完整段）", key=prefix+"manual", persist_state="session")
-            st.dataframe(pd.DataFrame(segments), hide_index=True)
-        else:
-            updates["manual_segment"] = None
-        # A concrete empty option avoids None being interpreted as an unset
-        # widget value and restored to its previous nonempty default on rerun.
-        backgrounds = [""] + [i for i in ids if i != ident and st.session_state.configs[i].get("role")=="背景"]
-        paired = False
-        if multi and cfg.get("role") != "背景":
-            mode = st.selectbox("背景模式", ["盘环配对背景", "分别指定背景"],
-                index=0 if cfg.get("background_mode") == "paired" else 1,
-                key=prefix+"background_mode", persist_state="session")
-            paired = mode == "盘环配对背景"
-        updates["background_mode"] = "paired" if paired else "independent"
-        updates["background_disk"] = st.selectbox("盘环配对背景文件" if paired else "盘背景", backgrounds,
-            index=backgrounds.index(cfg.get("background_disk")) if cfg.get("background_disk") in backgrounds else 0,
-            format_func=file_formatter(), key=prefix+"bg_disk", persist_state="session") or None
-        if paired:
-            updates["background_ring"] = updates["background_disk"]
-            st.caption("应用后同时更新盘、环背景：样品盘扣背景盘，样品环扣背景环；按各文件通道映射，不按列号猜测。")
-            st.caption(f"当前已应用：盘={file_formatter()(cfg.get('background_disk'))}；环={file_formatter()(cfg.get('background_ring'))}。")
-        st.caption("提交新背景关联后，默认沿用样品已应用的 pH；已有独立 pH 保留并核对差异。")
-        if multi:
-            with st.expander("高级：盘环通道与符号"):
-                channels = list(range(len(trace.columns)-1))
-                disk = st.selectbox("盘 / 主电流通道", channels,
-                    index=channels.index(cfg.get("disk_channel")) if cfg.get("disk_channel") in channels else 0,
-                    format_func=lambda v:trace.columns[v+1], key=prefix+"disk", persist_state="session")
-                options = [-1] + channels
-                ring = st.selectbox("环电流通道", options,
-                    index=options.index(cfg.get("ring_channel")) if cfg.get("ring_channel") in options else 0,
-                    format_func=lambda v:"无" if v == -1 else trace.columns[v+1], key=prefix+"ring", persist_state="session")
-                ring = None if ring == -1 else ring
-                updates.update(disk_channel=disk, ring_channel=ring)
-                updates["disk_sign"] = st.selectbox("盘还原电流的符号", [-1, 1], index=0 if cfg.get("disk_sign", -1)==-1 else 1,
-                    format_func=lambda v:"负" if v==-1 else "正", key=prefix+"disk_sign", persist_state="session")
-                updates["ring_sign"] = st.selectbox("环氧化电流的符号", [1, -1], index=0 if cfg.get("ring_sign", 1)==1 else 1,
-                    format_func=lambda v:"正" if v==1 else "负", key=prefix+"ring_sign", persist_state="session")
-            if not paired:
-                updates["background_ring"] = st.selectbox("环背景（单列背景按其唯一电流列）", backgrounds,
-                    index=backgrounds.index(cfg.get("background_ring")) if cfg.get("background_ring") in backgrounds else 0,
-                    format_func=file_formatter(), key=prefix+"bg_ring", persist_state="session") or None
-            with st.expander("环检测条件（实验核对）"):
-                updates["ring_material"] = st.text_input("环材质（选填记录）", cfg.get("ring_material", ""), key=prefix+"material", persist_state="session")
-                updates["ring_potential_V"] = st.number_input("环固定电位 / V（相对本文件原参比）", value=cfg.get("ring_potential_V"),
-                    format="%.4f", key=prefix+"ring_v", persist_state="session")
-                updates["ring_detection_confirmed"] = st.checkbox("已确认环电位适合定量检测过氧化物",
-                    value=cfg.get("ring_detection_confirmed", False), key=prefix+"ring_ok", persist_state="session")
-        else:
-            with st.expander("高级：电流符号"):
-                updates["disk_sign"] = st.selectbox("盘还原电流的符号", [-1, 1], index=0 if cfg.get("disk_sign", -1)==-1 else 1,
-                    format_func=lambda v:"负" if v==-1 else "正", key=prefix+"disk_sign", persist_state="session")
-        updates["ir_enabled"] = st.toggle("追加 iR 校正", value=cfg.get("ir_enabled", False), key=prefix+"ir", persist_state="session")
-        if updates["ir_enabled"]:
-            updates["ir_ohm"] = st.number_input("尚未补偿的电阻 / Ω *", min_value=0., value=float(cfg.get("ir_ohm", 0)),
-                step=.1, key=prefix+"resistance", persist_state="session")
-            updates["ir_confirmed"] = st.checkbox("确认导出电位未做这里追加的补偿，电阻是剩余未补偿部分",
-                value=cfg.get("ir_confirmed", False), key=prefix+"ir_ok", persist_state="session")
-        apply_group = st.checkbox("把扫描规则和方向应用到同组文件（清除同组其他文件的手选段）",
-            key=prefix+"group_scan")
-        if st.button("应用扫描与背景设置", type="primary"):
-            if updates.get("ring_channel") is not None and updates["ring_channel"] == updates["disk_channel"]:
-                st.error("盘、环不能使用同一个通道。")
-            else:
-                candidate = dict(cfg, **updates)
-                try:
-                    apply_background_binding(ident, candidate, st.session_state.traces, st.session_state.configs,
-                        updates["background_mode"], updates.get("background_disk"), updates.get("background_ring"))
-                except DataError as exc:
-                    st.error(str(exc))
-                    return
-                changed_records = [field for field in ("ring_material", "ring_potential_V")
-                                   if field in updates and cfg.get(field) != updates[field]]
-                cfg.update(candidate)
-                activate_ph_links(st.session_state.configs, [updates.get("background_disk"), updates.get("background_ring")])
-                sources = cfg.setdefault("parameter_sources", {})
-                for field in changed_records:
-                    sources[field] = "人工输入"
-                if apply_group:
-                    for key in ids:
-                        if key != ident and st.session_state.configs[key].get("group") == cfg.get("group"):
-                            st.session_state.configs[key].update(mode=updates["mode"], direction=updates["direction"], manual_segment=None)
-                invalidate()
-                st.rerun()
-    committed_backgrounds = [cfg.get("background_disk"), cfg.get("background_ring")]
-    background_ph_panel([i for i in committed_backgrounds if i is not None], f"scan_ph_{ident}")
-    if manual_enabled:
-        figure_style()
-        fig, ax = plt.subplots(figsize=(8, 3.5), layout="constrained")
-        channel = int(cfg.get("disk_channel", 0))+1
-        ax.plot(trace.values[:,0], trace.values[:,channel]*1000, color="#CDD4D8", lw=1)
-        if selected:
-            data = trace.values[selected["start"]:selected["end"]+1]
-            ax.plot(data[:,0], data[:,channel]*1000, color="#167D8D", lw=1.6)
-        ax.set(xlabel="E / V (original)", ylabel="I / mA", title="CV scan selection")
-        png, _ = figure_bytes(fig)
-        st.image(png, width="stretch")
-    with st.expander("原始表头与解析信息"):
-        st.code(trace.header["raw_text"], language=None)
-        st.caption(f"编码：{trace.encoding} · {len(trace.values)} 点 · SHA-256：{trace.sha256}")
+    from settings_editor import per_file_form as render
+    return render()
 
 
 def zip_exports(exports):

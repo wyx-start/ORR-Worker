@@ -1,6 +1,6 @@
 # ORR Worker 项目说明
 
-版本：1.5.0。首次交付：2026-10-14；本次实现：2026-10-18，最终复核：2026-10-19。本文件供后续开发者或 Codex 会话继续改进。
+版本：1.6.0。首次交付：2026-10-14；1.5.0 环图与配对背景于 2026-10-18 实现、2026-10-19 复核。本轮统一设置草稿、组合操作和 Origin 绘图 CSV。本文件供后续开发者或 Codex 会话继续改进。
 
 ## 1. 已确认的需求与边界
 
@@ -25,11 +25,13 @@
 | iR | 默认关闭；用户明确剩余电阻与已补偿情况后开启 |
 | 归一化 | I 内部为 A；新文件默认直径 5 mm、面积 π/16 cm²，可改尺寸或直接填面积；旧项目面积优先 |
 | 条件输入 | 根据当前页面/纵轴显示必要条件，必填标注 *；其余高级设置折叠 |
-| 常用条件 | 项目内预设 + 主动保存的本机预设；主动套用，默认不覆盖人工非空值，不继承核对状态 |
+| 设置生效 | 文件配置与全局坐标先汇入共享草稿，统一应用；来源和目标分开，默认当前组，切换不自动复制 |
+| 组合操作 | 有草稿时支持应用并计算／导出／保存项目；分析先做任务预检查，合法缺项记录可单独应用保存 |
+| 常用条件 | 载入到草稿，默认不覆盖人工非空值；一个保存入口选择项目／本机，不继承核对状态 |
 | 平滑 | 默认关闭；仅极化曲线绘图 SG 二阶；11/21/51 点或自定义奇数窗口 |
 | K–L | 表观 n；2e/4e 标为两路径模型估算 |
 | RRDE | 过氧化物产率、n、两产物模型下的四电子比例 |
-| 输出 | PNG 300 dpi、矢量 SVG、UTF-8 BOM CSV、JSON；可独立或 ZIP 下载 |
+| 输出 | 优先导出当前绘图 CSV；各样品独立 XY；保留 PNG 300 dpi、SVG、完整数据、JSON 及 ZIP |
 | 项目 | `.orrproj` ZIP 中包含原始文件、配置和设置，不使用 pickle |
 
 ## 2. 启动与开发环境
@@ -68,8 +70,14 @@ orr_workbench/
   plot_smoothing.py         独立绘图副本平滑、连续段/采样检查与记录
   experiment_conditions.py  纯参数校验、面积换算、预设存取与应用规则
   background_ph.py          独立的背景 pH 依赖、模式、来源及冲突解析
-  condition_ui.py           按用途显示条件、默认项、必填摘要及预设界面
-  ui_shared.py              扫描/背景表单、批量状态、图形、导出工具
+  background_pairing.py     配对背景通道和绑定校验
+  ring_comparison.py        已知环图条件冲突及缺失记录审查
+  settings_draft.py         不依赖 Streamlit 的草稿域、冲突检测和候选校验
+  settings_editor.py        扫描／背景／背景 pH 编辑，只暂存不提交
+  condition_ui.py           已应用／待修改摘要、来源和范围、条件与预设草稿
+  origin_export.py          当前绘图数值到独立列组 CSV 的纯映射
+  download_ui.py            统一导出区；校验成功后把固定字节交给 v2 下载桥
+  ui_shared.py              共享草稿包装、统一应用、所选处理、状态、图形与导出
   launch.py                 Windows 本地启动与停止
   app_pages/
     import_data.py          导入、元数据核对、实验条件、扫描/通道/背景设置
@@ -77,13 +85,17 @@ orr_workbench/
     kl.py                   物性、共同电位区间、K–L 拟合和模型估算
     rrde.py                 RRDE 比值、符号/阈值检查和选择性图
     export.py               独立导出、结果 ZIP、项目保存
-  examples/                 用户提供的四份 TXT 副本
+  examples/                 本地可保留原始样例；公开包只使用标明 SYNTHETIC 的合成样例
   tests/test_core.py         已知答案、真实样例和异常边界数值测试
   tests/test_app.py          Streamlit AppTest 界面流程
   tests/test_launcher.py     本机健康接口与代理回归测试
   tests/test_smoothing.py    已知信号、缺口、短段、非均匀采样、关闭行为
   tests/test_rpm.py          转速写法、边界、来源、补空白与旧项目兼容
   tests/test_conditions.py   默认面积、用途校验、预设、隐藏参数及旧项目面积兼容
+  tests/test_condition_draft.py  来源／范围隔离、预设接续手改、错误保留及统一提交
+  tests/test_settings_draft.py   纯候选状态、冲突与事务校验
+  tests/test_shared_draft_ui.py  共享候选、组合操作、错误与修订的界面回归
+  tests/test_origin_export.py    独立网格、显示变量、缺口和数值 CSV 回读
   tests/browser_conditions.cjs  隔离服务上的条件表单与项目恢复验证
   tests/browser_rpm.cjs      真实浏览器上传、旧项目、补空白和保存恢复
   tests/create_rpm_browser_fixture.py  生成旧版项目浏览器夹具
@@ -105,11 +117,13 @@ orr_workbench/
 TXT bytes
   -> parse_chi -> Trace（原字节、表头、列、SI/指定内部单位、SHA-256）
   -> default_config / infer_rpm_from_name -> 用户核对并编辑配置
+  -> settings_draft -> 候选配置＋候选全局设置 -> 校验／统一应用
   -> scan_segments / select_segment -> 扫描段
   -> base_curve -> 可选原始总电流 iR + RHE 平移
   -> process_trace -> 背景插值、带符号相减、盘面积归一化
       -> plot_smoothing.smooth_for_plot -> 独立绘图副本（极化页）
       -> kl_calculate 或 rrde_calculate（未平滑数据）
+  -> origin_export（当前图独立列组）或完整数据长表
   -> CSV / PNG / SVG / 参数 JSON / .orrproj
 ```
 
@@ -119,12 +133,13 @@ TXT bytes
 
 - `E_original_V`：原始电位；`E_V`：选定坐标、可选 iR 后的电位。
 - `I_disk_raw_A`、`I_ring_raw_A`：原始盘环电流。
-- `I_disk_background_A`、`I_ring_background_A`：对齐后的背景。无背景时为 0，但处理记录明确标记未扣背景。
+- `I_disk_background_A`、`I_ring_background_A`：实际参与并对齐后的背景。盘／完整处理未绑定背景可保留 0；环单通道未参与的背景保留 NaN。以处理状态判定未绑定、未参与或真实零背景，不从数值猜测。
 - `I_disk_A`、`I_ring_A`：带符号扣背景后的电流。
 - `I_disk_mA`、可选 `j_disk_mA_cm2`：显示与输出用列。
 - RRDE：`peroxide_pct`、`n_RRDE`、`four_e_pct_model`、`valid_two_product_model`、`status`。
 - K–L：`n_KL`、两条模型比例、斜率/截距/R²、斜率标准误和 n 标准误、状态。
 - 仅极化页的平滑副本：`I_disk_smoothed_plot_only_A`、`I_disk_smoothed_plot_only_mA`、可选 `j_disk_smoothed_plot_only_mA_cm2`、`smoothing_plot_status`。所有原有列逐值保留。
+- 当前盘／环图均记录 `plotted_current_value`、单位、通道和平滑开关；这些显示列随当前图变化，不能用于“未平滑科学列逐值不变”的比较，也不能作为 K–L／RRDE 输入。
 
 文件 ID 为 SHA-256(name + NUL + raw) 的前 16 个十六进制字符；完整 SHA-256 用于原始字节校验。相同内容不同文件名可作为不同记录，便于重复实验。
 
@@ -138,7 +153,7 @@ TXT bytes
 
 `RPM_FIELDS` 定义持久化字段：`rpm`、`rpm_source`、`rpm_status`、`rpm_matches`、`rpm_candidates`、`rpm_note`。来源为 filename_explicit、filename_legacy、manual、saved_project 或 none；状态独立区分 recognized、inferred、ambiguous、invalid、unsupported 等。`rpm_source_label()` 把冲突/无效情况优先显示为待填写。
 
-`set_manual_rpm()` 验证非负有限值或空白，只有实际改值才记为 manual，单纯确认不会丢掉自动来源。`fill_missing_rpms()` 只补空白，0 和任何非空值都保留，不改现有分组。手改表格需先提交表单；补全按钮读取的是已应用配置。数值变动后调用 `invalidate()`；没有填入任何值时只更新识别说明和参数导出，不使有效计算失效。
+`set_manual_rpm()` 验证非负有限值或空白，只有实际改值才记为 manual，单纯查看不会丢掉自动来源。`fill_missing_rpms()` 只补空白，0 和任何非空值都保留，不改现有分组。1.6.0 起，表格手改和补全都读取当前候选、进入明确的草稿域，统一应用后调用 `invalidate()`；不因展示识别结果自动提交。
 
 默认分组移除明确匹配片段或旧式末尾数字，清理多余分隔符和空括号；不删除浓度、日期、扫描速度、重复编号等信息。冲突或无效时不盲目合并。人工分组和项目分组保留。
 
@@ -152,13 +167,17 @@ TXT bytes
 
 `invalidate()` 在清空旧结果前同步派生状态，覆盖绑定、参数应用、预设、移除与恢复；`process_trace`、`pack_project`、`parameter_record` 和 `unpack_project` 独立重新解析，防止绕过 UI 使用陈旧值。原始坐标同样阻止明确冲突；实测 RHE 总偏移/已是 RHE 仍无需为了电位换算补 pH。不同的独立 pH 保留并提示，不自动伪造同条件。
 
-元数据和逐文件提交调用 `activate_ph_links`，候选预览不调用。旧项目缺少模式时保留独立 pH，包括空白；主动重新确认空背景绑定或开启 follow 后可采用新规则。解绑最后一个来源仅清理派生值，独立值保留。未复制参比、温度、气氛、面积或 N。
+1.6.0 起元数据和逐文件编辑先暂存；候选校验在副本上处理背景绑定、调用 `activate_ph_links` 并解析 pH，不因此改写已应用配置。统一应用后同步实际派生状态。旧项目缺少模式时保留独立 pH，包括空白；主动重新确认空背景绑定或开启 follow 后可采用新规则。解绑最后一个来源仅清理派生值，独立值保留。未复制参比、温度、气氛、面积或 N。
 
 `apply_conditions(..., background_ph_edit=...)` 区分直接编辑背景与从样品批量应用：后者不会意外将 follow 变成 manual；前者改变 pH 时显式转为独立。跟随关系字段不进入常用预设白名单。具体审核和测试记录见 `REVIEW_1.4.0.md` 与 `VALIDATION.md`。
 
-### 条件与默认值（1.3.0）
+### 条件与默认值（1.3.0 引入，1.6.0 调整交互）
 
-`condition_ui.common_parameter_form(purpose, ids, density)` 在导入、绘图、K–L、RRDE 页面提供条件摘要和折叠编辑区。方式选择在表单批处理外触发显隐，数值暂存为 widget 草稿，只有点击“应用实验参数”才写入 configs。条件 widget 使用文件 ID、revision 和 session 持久化键；隐藏的方式参数不会被空值覆盖。页面标题与来源摘要是核对入口，最终计算仍在核心层校验。
+`condition_ui.common_parameter_form(purpose, ids, density, channels, subtract_background)` 在导入、绘图、K–L、RRDE 页面提供已应用／待修改摘要和默认折叠的编辑区。先选择本次文件，再按任务展示所需输入。`channels="disk"` 只核对盘背景，`"ring"` 只核对环背景；完整 RRDE 核对两者。
+
+读取来源和应用目标独立；范围为“仅此文件／当前组／自选”，默认当前组。仅切换来源或范围不复制条件。输入真正变化时，在副本上调用 `apply_conditions(overwrite=True)`，将当前整套显示条件形成字段补丁，暂存到 `conditions:{source_id}` 编辑域；“复制当前条件到所选范围”是显式整套复制到草稿的动作，不是另一套提交按钮。切换上下文的首轮只读取，避免旧输入被投向新范围。
+
+条件控件用来源、目标 ID、用途、修订和草稿重置计数组成的上下文，保留跨页状态；隐藏方式的已存参数不清空。成功暂存后不触发额外 `st.rerun()`，保证本次点击的计算／导出事件继续使用最后输入。预设显式载入后才刷新视图；即使来源不在目标范围，载入模板仍可显示并接续手改。原配置和可复用条件来源均不受显示控件隐式覆盖。
 
 新字段：`disk_diameter_mm`、`area_mode`（diameter/area）、`parameter_sources`。新文件盘面积为 `math.pi*(5/20)**2`，显示可舍入，计算保留精度；直接面积模式清空直径避免标签矛盾。旧项目缺少尺寸字段时保留面积（包括 None），尺寸置 None，不推定成 5 mm；来源缺失如实记录。schema 保持 1。
 
@@ -168,9 +187,9 @@ TXT bytes
 
 新增数值预设仅为用户明确指定的 5 mm 几何尺寸；pH、N 和实测偏移没有通用假定值。K–L 只包装已有 KOH 文献参数为方案选择，不新增其他电解液常数，不自动推定 NaOH 与 KOH 相同。
 
-1.3.1 修正“已填 pH 仍报缺失”的诊断体验：`unapplied_changes` 区分编辑草稿和已应用配置，未应用时阻止把旧配置保存为常用条件。`linked_backgrounds` 检查样品实际依赖的背景，摘要显示背景的换算缺失；`process_trace` 捕获背景基础处理错误并附背景名称和通道。条件来源可选择背景，背景编辑不要求面积/N。用户主动点击加入关联背景时，回调仅更新目标控件，不覆盖参数；仍由“应用实验参数”提交并使旧结果失效。
+历史记录：1.3.1 修正“已填 pH 仍报缺失”的诊断体验，当时用 `unapplied_changes` 区分输入和已应用配置，阻止保存旧预设，并提供局部提交按钮和加入关联背景按钮。1.6.0 已由共享草稿、明确自选范围和统一应用替换这些交互；保存预设有草稿时先统一应用，再读取来源文件的已应用条件，位置通过“当前项目／本机”选择。条件来源仍可选择背景，背景编辑不要求面积/N。`linked_backgrounds` 和 `process_trace` 的背景错误上下文继续保留。
 
-本补丁完整测试 66 项通过，新增两个界面回归和一个核心错误上下文测试；`tests/browser_ph.cjs` 在隔离服务上验证草稿提示、项目预设防误存、关联背景加入、应用后 K–L 可用和参数导出。未修改用户实际会话或本机常用配置。
+该历史补丁完整测试 66 项通过，新增两个界面回归和一个核心错误上下文测试；`tests/browser_ph.cjs` 当时在隔离服务上验证草稿提示、项目预设防误存、关联背景加入、应用后 K–L 可用和参数导出。现行交互的验证以 1.6.0 测试和 `VALIDATION.md` 为准，旧脚本按钮文案不能作为新实现依据。
 
 ### 5.1 扫描段
 
@@ -234,19 +253,33 @@ C：mol/cm³；D、ν：cm²/s。j 已除面积，因此 B 中不能再乘面积
 
 报告包含算法、SciPy 版本、窗口、阶数、端部模式、容差、逐段实际步长/窗口跨度、平滑/保留/缺口计数和原因。报告段索引是当前所选处理支线中的 0 起索引。端部多项式估计会改变端点，可能过冲；不要把平滑解释为真实信号恢复或峰形不变。
 
-只在 `polarization_data.csv` 中增加平滑列；`all_curves.csv` 保持未平滑处理数据。图片页脚标明仅绘图平滑及窗口阶数。
+盘图／环图的完整数据表分别保留独立平滑列和显示状态；`all_curves.csv` 保持未平滑公共处理数据。绘图 CSV 从同一份绘图副本的当前实线取值，开启时变量名称包含 `smoothed_plot_only`。图片页脚标明仅绘图平滑及窗口阶数。
 
 ## 6. 状态、缓存与保存
 
-状态统一在 `ui_shared.initialize()` 初始化。`traces`、`configs`、`settings` 为主状态；`revision` 是数据/实验配置修订号；`results`、`exports` 是当前结果。
+状态统一在 `ui_shared.initialize()` 初始化。`traces`、`configs`、`settings` 为已应用主状态；`revision` 是数据／科学配置修订号；`results`、`exports` 是当前有效结果。`settings_draft` 记录基础修订号和按域划分的逐文件／全局补丁；`draft_epoch` 只在应用、明确放弃或数据重置时递增，普通暂存不递增。控件值、编辑器显示快照与共享业务草稿分开，收起或跨页不等于提交。
 
-修改导入数据、分组、实验条件、扫描、背景或电位坐标后，调用 `invalidate()`：递增修订号，并清空旧结果和旧导出，避免下载过时计算。图形设置单独保留在 `settings.plot`。K–L 是提交表单后计算，显示“上次计算”参数含义；RRDE 与当前阈值一起计算。
+`settings_draft.py` 的 `stage_config`／`stage_settings` 检测独立编辑域对同一叶字段的矛盾修改；同域后续编辑允许覆盖前值。`candidate` 在深拷贝上合并，核对基础修订、数值／结构、有效通道、人工段、背景图及 pH 解析；缺少任务输入或共享 pH 冲突可保留为合法待解决记录。没有草稿时普通预览可读取已应用副本，不因无关任务字段阻止原始电流预览。
+
+`ui_shared.stage_config_updates`／`stage_settings_updates` 剪除与已应用值相同的叶字段，维护按域错误及拒绝编辑，避免另一控件成功重跑清除错误。条件本地校验失败同样登记到对应域，用户在该域修正（包括修回原值）或明确放弃后才能解除。`get_draft_configs`／`get_draft_settings` 提供编辑读取；`pending_candidate` 用于提交与任务快照。
+
+`apply_pending_settings(preflight=None)` 统一取得合法候选，先执行需要的任务预检查，再一次提交 `configs` 和科学 `settings`，最后 `invalidate()` 递增修订并清除旧结果／导出。失败保留草稿，不提交半份文件配置或只提交全局坐标。普通“应用设置”和保存项目允许合法缺项；“应用并计算／导出”检查所选任务实际依赖，不静默剔除 K–L 转速。成功提交后发生任务生成错误时，按已应用的新修订报告失败，不恢复旧结果伪装成功。
+
+K–L／RRDE 都保留明确计算动作，使用本次输入签名及修订保存结果。选择、物性／区间、阈值等分析输入变化时清理相应旧结果；其他未参与文件的普通缺项不作为当前文件选择的错误。图形设置独立保留，平滑等只影响对应图表。
 
 平滑配置保存于 `settings.plot.smoothing`，逐文件处理报告于 `settings.plot.smoothing_report`。极化页更新时 `clear_polarization_exports()` 只清除旧极化图/表/参数和旧平滑报告，不递增计算修订号、不清空 K–L/RRDE 结果。科学配置变动仍用 `invalidate()` 并移除过时平滑报告。
 
 平滑设置随 schema=1 项目原样保存；不增加逐文件 config 字段，不改变项目 schema。旧项目没有该设置时默认关闭。平滑控件 key 含当前 revision，使项目恢复后使用恢复设置而非旧控件值。
 
 只缓存文件解析，`st.cache_data(max_entries=40)`。单批规模很小，数值处理实时计算。文件选项格式化使用不可变标签快照，避免跨线程/测试状态读取问题。
+
+### Origin 绘图 CSV 与下载交接（1.6.0）
+
+`origin_export.py` 只映射已有绘图／计算值，不负责插值、平滑、裁剪或重采样。极化／环图每样品一组独立 XY，RRDE 每样品一组 E／过氧化物率／n／四电子比例；K–L 结果保持共同 E，拟合图按各分析电位输出 X／Y／Yfit 列组。序列使用位置顺序横向并置，保留内部 NaN，短列尾部为空；不依赖样品索引对齐。样品名加稳定 ID 前缀区分重名，短前缀冲突时确定性延长。`csv_bytes` 使用 UTF-8 BOM、无索引、单行表头和 `%.17g` 精度。CSV 不能携带 Origin 的列指定元数据，用户导入后按独立 XY 组设置。
+
+盘／环图的列名从明确的通道、单位、轴和平滑状态生成，Y 值直接使用 `plotted_current_value`，与实线共用变量来源；浅色未平滑参考线不替代当前实线。完整长表及分析有效性状态仍独立保留，便于核查科学数据。
+
+`download_ui.result_downloads` 提供统一“绘图 CSV／PNG”和“更多导出”区域。无草稿的既有图像／表格可用原生下载；有草稿时这些旧字节禁用。组合导出用普通按钮在页面线程内处理最后输入、任务校验、统一提交和字节生成，然后 `send_download` 把已校验的固定字节、文件名、MIME、一次性 token 交给小型 Streamlit v2 组件。该组件只创建 Blob 下载，不读取或修改科学状态，也不承担计算／提交；生成失败时不向浏览器发送旧字节。不要改回“先把旧字节传给下载按钮，再期望回调替换”的模式，也不要在普通输入暂存后重跑而丢弃同次按钮事件。
 
 项目 schema=1：
 
@@ -257,9 +290,11 @@ project.json
 raw/<id>.txt
 ```
 
-只在内存读取 ZIP，不向文件系统解压路径。加载时验证版本、总体大小、原字节 SHA 和 ID。结果表与图片不保存在项目中，而是在恢复参数后重新计算。结果 ZIP 与项目文件用途不同。
+只在内存读取 ZIP，不向文件系统解压路径。加载时验证版本、总体大小、原字节 SHA 和 ID。项目保存通过统一应用后打包已应用原始数据和设置，不把控件草稿或本机预设名称当作真实配置；合法缺项、共享 pH 冲突可以保存，恢复后仍需解决才能分析。结果表与图片不保存在项目中，恢复后明确重新计算。结果 ZIP 与项目文件用途不同。
 
 ## 7. 验证依据
+
+1.6.0 新增共享草稿、条件范围、下载修订和 Origin CSV 数值映射测试；本轮数量与执行结果统一记录在 `VALIDATION.md`。`tests/browser_ui_simplification.cjs` 使用独立服务和合成项目检查实际输入、点击与下载，不操作用户正在分析的浏览器会话。下列早期版本及真实样例信息保留作历史方法依据。
 
 四份真实样例：
 
@@ -289,7 +324,7 @@ raw/<id>.txt
 ## 8. 已知限制与改进顺序
 
 1. **实验数据扩充**：先增加更多真实转速、不同内充液/参比、真正中途截断和多圈数据；用人工核验的扫描范围作回归依据。
-2. **背景匹配**：当前只有单背景的候选预填与人工核对，可增加按气氛、电解液、转速、扫描速率和电極配置评分的匹配建议，不能自动当作已确认配对。
+2. **背景匹配**：当前以明确选择和人工核对为准，可增加按气氛、电解液、转速、扫描速率和电极配置评分的匹配建议，不能自动当作已确认配对。
 3. **重复实验**：当前 K–L 同转速重复文件要手选，可增加显式平均/误差条和重复组，而不是静默合并。
 4. **更多导入格式**：当前不解析辰华二进制，不支持任意缺表头 CSV；有真实样例后增加适配器，不依赖固定行数。
 5. **项目迁移与校验**：若增加字段或重构结构，保持 schema 迁移，并扩充错误类型/字段边界校验。
@@ -299,6 +334,8 @@ raw/<id>.txt
 目前同类图片用固定文件名，导出页保留当前最后生成的该类图片；要保存多个组的图，请分别下载，或后续改为按实验组命名。第一版以本机 Windows 为目标，换电脑后按 README 安装 Python 3.13 和项目依赖。
 
 ## 9. 后续会话接手清单
+
+1.6.0 的已确认设计和完成记录见 [操作简化工作计划](tasks/UI_SIMPLIFICATION_WORK_PLAN.md)。后续修改入口应先理解 `settings_draft`、UI 暂存包装、候选任务检查及下载字节交接：同一编辑器的后续手改可以更新草稿，独立编辑域的矛盾修改必须显式解决；一次组合动作不能读到旧结果，也不能因输入暂存后无条件重跑而吞掉下载事件。项目 schema 仍为 1，草稿状态本身不序列化。
 
 1.5.0 的环图与背景配对见 [任务及完成记录](tasks/RING_CURRENT_COMPARISON_AND_PAIRED_BACKGROUND.md)。新增 `background_pairing.py` 提供原子绑定校验，`ring_comparison.py` 只比较已知条件，不把未知判为一致；数值比较采用小容差，文本做空白与大小写规范化，不猜电解液等价。
 

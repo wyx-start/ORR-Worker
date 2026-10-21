@@ -1,19 +1,24 @@
+from copy import deepcopy
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 from condition_ui import common_parameter_form
-from orr_core import DataError, json_bytes, potential_signature
+from orr_core import DataError, json_bytes, potential_signature, parameter_record
+from origin_export import curve_plot_table
+from download_ui import result_downloads
 from plot_smoothing import (PRESET_WINDOWS, SMOOTH_DENSITY, SMOOTH_MA,
                             smooth_for_plot, smoothing_defaults)
 from ring_comparison import audit_ring_comparison
 from ui_shared import (axis_label, figure_style, file_formatter, label, merged_data, offer_figure, parameters,
-                       clear_polarization_exports, process_all, require_files, show_errors, show_notes, store_table)
+                       clear_polarization_exports, process_all, require_files, show_errors, show_notes, store_table,
+                       get_draft_configs, get_draft_settings, pending_candidate, has_draft,
+                       apply_settings_button, apply_pending_settings, process_selected, set_export, csv_bytes)
 
 st.title("极化曲线")
 st.caption("从 CV 提取的单向极化曲线。可选平滑只用于这张图，K–L 与 RRDE 计算继续使用未平滑数据。")
 require_files()
-channel = st.selectbox("绘制通道", ["盘电流", "环电流"],
-    index=1 if st.session_state.settings.get("plot_channel") == "ring" else 0,
+channel = st.segmented_control("绘制通道", ["盘电流", "环电流"],
+    default="环电流" if st.session_state.settings.get("plot_channel") == "ring" else "盘电流",
     key=f"curve_channel_{st.session_state.revision}")
 is_ring = channel == "环电流"
 st.session_state.settings["plot_channel"] = "ring" if is_ring else "disk"
@@ -33,31 +38,43 @@ else:
         index=1 if settings.get("density") else 0, key=f"curve_units_{st.session_state.revision}")
 settings["density"] = not is_ring and units.startswith("电流密度")
 subtract_background = not is_ring or view == "处理后"
-ring_ids = [i for i,c in st.session_state.configs.items() if c.get("role") != "背景" and c.get("ring_channel") is not None] if is_ring else None
-if is_ring and not ring_ids:
-    st.info("暂无有效环通道候选，请在扫描与背景中核对盘环接线；单通道文件不加入环图。")
-    st.stop()
-common_parameter_form(purpose="ring" if is_ring else "curves", ids=ring_ids, density=settings["density"],
-                      channels="ring" if is_ring else "all", subtract_background=subtract_background)
-outputs, errors = process_all(channels="ring" if is_ring else "all", subtract_background=subtract_background)
-show_errors(errors)
-if not outputs:
-    st.info("请补全实验参数；如需先看原始曲线，可将左侧电位坐标切为“原始”。")
-    st.stop()
-groups = list(dict.fromkeys(o["config"]["group"] for o in outputs.values()))
+configs = get_draft_configs()
+options_all = [i for i,c in configs.items() if c.get("role") != "背景" and (not is_ring or len(st.session_state.traces[i].columns)>=3)]
+groups = list(dict.fromkeys(configs[i].get("group","未分组") for i in options_all))
 group_options = ["全部"]+groups
-saved_group = settings.get("group", groups[0])
-group = st.selectbox("按组筛选", group_options, index=group_options.index(saved_group) if saved_group in group_options else 0)
-options = [k for k,o in outputs.items() if group=="全部" or o["config"]["group"]==group]
-selection_by_group = settings.setdefault("selection_by_group", {})
-default_selection = [k for k in selection_by_group.get(group, options) if k in options]
-selected = st.multiselect("叠加显示的曲线", options, default=default_selection, format_func=file_formatter(), key=f"curve_selection_{group}_{st.session_state.revision}")
+saved_group = settings.get("group", "全部")
+group = st.selectbox("按组筛选",group_options,index=group_options.index(saved_group) if saved_group in group_options else 0,
+                     key=f"curve_group_{is_ring}_{st.session_state.revision}",persist_state="session")
+options = [k for k in options_all if group=="全部" or configs[k].get("group")==group]
+selection_by_group = settings.setdefault("selection_by_group",{})
+default_selection = [k for k in selection_by_group.get(group,options) if k in options]
+selected = st.multiselect("叠加显示的曲线", options,default=default_selection,format_func=file_formatter(),
+    key=f"curve_selection_{is_ring}_{group}_{st.session_state.revision}",persist_state="session")
 settings["group"] = group
 selection_by_group[group] = selected
+common_parameter_form(purpose="ring" if is_ring else "curves",ids=selected or options,
+    density=settings["density"],channels="ring" if is_ring else "all",subtract_background=subtract_background)
+with st.expander("修改扫描与背景"):
+    from ui_shared import per_file_form
+    per_file_form()
+apply_settings_button("curve_apply")
 if not selected:
     st.info("至少选择一条曲线。")
     st.stop()
-chosen = {k:outputs[k] for k in selected}
+try:
+    candidate_configs,candidate_settings = pending_candidate()
+except (DataError,ValueError,TypeError) as exc:
+    st.error(str(exc))
+    st.stop()
+outputs,errors = process_selected(selected,candidate_configs,candidate_settings,
+    channels="ring" if is_ring else "all",subtract_background=subtract_background)
+show_errors(errors)
+if not outputs:
+    st.info("请在上方修改设置；也可以选择原始电位预览。")
+    st.stop()
+chosen = outputs
+if has_draft():
+    st.caption("以下是未应用设置的预览；导出时会先校验并应用。")
 if is_ring:
     audit = audit_ring_comparison(chosen)
     settings["comparison_audit"] = audit
@@ -81,23 +98,28 @@ smooth_key = f"smoothing_{st.session_state.revision}" + ("_ring" if is_ring else
 with st.container(border=True):
     st.subheader("曲线平滑（仅绘图）")
     enabled = st.toggle("启用曲线平滑", value=bool(smooth_cfg["enabled"]), key=smooth_key+"_enabled")
-    a, b = st.columns(2)
-    with a:
-        strength_options = list(PRESET_WINDOWS) + ["自定义"]
-        saved_strength = smooth_cfg.get("preset", "弱")
-        strength = st.selectbox("平滑强度", strength_options,
-                                index=strength_options.index(saved_strength) if saved_strength in strength_options else 0,
-                                format_func=lambda v: f"{v} · {PRESET_WINDOWS[v]} 点" if v in PRESET_WINDOWS else "自定义奇数窗口",
-                                disabled=not enabled, key=smooth_key+"_strength")
-        custom = smooth_cfg.get("custom_window", 11)
-        if strength=="自定义":
-            custom = st.number_input("自定义窗口 / 点（5–1001 的奇数）", min_value=5, max_value=1001,
-                                     value=int(custom), step=2, disabled=not enabled, key=smooth_key+"_custom")
-        window = PRESET_WINDOWS.get(strength, int(custom))
-    with b:
-        show_unsmoothed = st.toggle("显示浅色未平滑参考线", value=bool(smooth_cfg["show_unsmoothed"]),
-                                     disabled=not enabled, key=smooth_key+"_reference")
-    st.caption("Savitzky–Golay · 二阶多项式。窗口越大，细节可能越少；端部也可能改变。缺口不补齐，短段或不等间距段保留未平滑数据。")
+    strength = smooth_cfg.get("preset","弱")
+    custom = smooth_cfg.get("custom_window",11)
+    window = smooth_cfg.get("window_points",11)
+    show_unsmoothed = smooth_cfg.get("show_unsmoothed",True)
+    if enabled:
+        a, b = st.columns(2)
+        with a:
+            strength_options = list(PRESET_WINDOWS) + ["自定义"]
+            saved_strength = smooth_cfg.get("preset", "弱")
+            strength = st.selectbox("平滑强度", strength_options,
+                                    index=strength_options.index(saved_strength) if saved_strength in strength_options else 0,
+                                    format_func=lambda v: f"{v} · {PRESET_WINDOWS[v]} 点" if v in PRESET_WINDOWS else "自定义奇数窗口",
+                                    disabled=not enabled, key=smooth_key+"_strength")
+            custom = smooth_cfg.get("custom_window", 11)
+            if strength=="自定义":
+                custom = st.number_input("自定义窗口 / 点（5–1001 的奇数）", min_value=5, max_value=1001,
+                                         value=int(custom), step=2, disabled=not enabled, key=smooth_key+"_custom")
+            window = PRESET_WINDOWS.get(strength, int(custom))
+        with b:
+            show_unsmoothed = st.toggle("显示浅色未平滑参考线", value=bool(smooth_cfg["show_unsmoothed"]),
+                                         disabled=not enabled, key=smooth_key+"_reference")
+        st.caption("Savitzky–Golay · 二阶多项式。窗口越大，细节可能越少；端部也可能改变。缺口不补齐，短段或不等间距段保留未平滑数据。")
 smooth_cfg.update(enabled=enabled, preset=strength, window_points=int(window), custom_window=int(custom),
                   show_unsmoothed=show_unsmoothed)
 settings["smoothing"] = smooth_cfg
@@ -119,7 +141,7 @@ with st.expander("图形设置", expanded=False):
         ymax = st.number_input("纵轴最大值（空白＝自动）", value=settings.get("ymax"), format="%.4f")
     colors = settings.setdefault("colors", {})
     palette = ["#167D8D", "#D66A3C", "#6956A3", "#609A65", "#B7486C", "#A68138", "#416EBA", "#777777"]
-    for index, ident in enumerate(selected):
+    for index, ident in enumerate(chosen):
         colors[ident] = st.color_picker(outputs[ident]["config"]["name"], value=colors.get(ident, palette[index%len(palette)]), key=f"color_{ident}_{st.session_state.revision}")
 settings.update(density=units.startswith("电流密度"), title=title, legend=legend, line_width=line_width,
                 width=width, height=height, xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax)
@@ -159,9 +181,11 @@ for ident, result in plotted.items():
     if enabled and show_unsmoothed and smoothing_reports[ident]["applied_points"]:
         ax.plot(df.E_V, df[ycol], color=colors[ident], lw=max(.7, line_width*.65), alpha=.28, zorder=1)
     display_col = (f"I_ring_smoothed_plot_only_{settings['unit']}" if is_ring else (SMOOTH_DENSITY if settings["density"] else SMOOTH_MA)) if enabled else ycol
+    df["plotted_current_value"] = df[display_col]
+    df["plotted_current_unit"] = settings["unit"] if is_ring else ("mA/cm2" if settings["density"] else "mA")
+    result["plot_channel"] = "ring" if is_ring else "disk"
+    result["plot_smoothing_enabled"] = enabled
     if is_ring:
-        df["plotted_current_value"] = df[display_col]
-        df["plotted_current_unit"] = settings["unit"]
         df["background_view"] = settings["background_view"]
         df["sample_name"] = result["config"]["name"]
         df["I_ring_corrected_A"] = df["I_ring_A"] if subtract_background else float("nan")
@@ -178,15 +202,42 @@ if enabled:
 export_name = "ring_current" if is_ring else "polarization"
 offer_figure(fig, export_name)
 data = merged_data(plotted)
-payload = store_table(f"{export_name}_data.csv", data)
+payload = csv_bytes(data)
 parameter_name = "ring_current_parameters.json" if is_ring else "parameters.json"
-parameter_payload = json_bytes(parameters(outputs))
-if is_ring:
-    from ui_shared import set_export
-    set_export(parameter_name, parameter_payload, "application/json")
-with st.container(horizontal=True):
-    st.download_button("单独导出曲线 CSV", payload, f"{export_name}_data.csv", "text/csv")
-    st.download_button("单独导出参数 JSON", parameter_payload, parameter_name, "application/json")
+parameter_payload = json_bytes(parameter_record(st.session_state.traces,candidate_configs,
+    get_draft_settings(),outputs))
+plot_name = f"{export_name}_plot.csv"
+plot_payload = csv_bytes(curve_plot_table(plotted))
+if not has_draft():
+    set_export(f"{export_name}_data.csv",payload,"text/csv")
+figure_exports = {name:deepcopy(st.session_state.exports[name]) for name in (export_name+".png",export_name+".svg") if name in st.session_state.exports}
+if has_draft():
+    for name in list(st.session_state.exports):
+        if name.startswith(export_name) or name==parameter_name:
+            st.session_state.exports.pop(name,None)
+
+def prepare_curve_export():
+    # Re-validate the same candidate before committing; this run's plotted table
+    # already uses its current units, background view and display smoothing.
+    def preflight(configs, scientific_settings):
+        check, failures = process_selected(selected,configs,scientific_settings,
+            channels="ring" if is_ring else "all",subtract_background=subtract_background)
+        if not check:
+            raise DataError("所选文件均未处理成功，未应用或下载。")
+        if set(check)!=set(plotted):
+            raise DataError("处理结果已变化，请核对文件状态后重新导出。")
+    apply_pending_settings(preflight=preflight)
+    set_export(plot_name,plot_payload,"text/csv")
+    set_export(f"{export_name}_data.csv",payload,"text/csv")
+    set_export(parameter_name,parameter_payload,"application/json")
+    for name,info in figure_exports.items():
+        set_export(name,info["bytes"],info["mime"])
+    return plot_payload,plot_name,"text/csv"
+
+result_downloads(plot_payload,plot_name,figures=(export_name,),key=export_name,
+    prepare=prepare_curve_export,extras=[("完整数据 CSV",f"{export_name}_data.csv",payload,"text/csv"),
+    ("参数 JSON",parameter_name,parameter_payload,"application/json")])
+st.caption("Origin：按每个样品独立的 X／Y 列组导入；保留各自电位网格与缺口。")
 show_notes(chosen)
 if enabled:
     st.caption("CSV 中 smoothed_plot_only 列对应图中的实线；I_disk_A / I_ring_A 等原有列仍是未平滑数据。浅色参考线可隐藏，分析计算始终不变。")

@@ -9,6 +9,7 @@ import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 from orr_core import pack_project, unpack_project
+from settings_draft import new_draft
 from test_ring_comparison import ring_fixture
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -31,6 +32,7 @@ class RingAppTests(unittest.TestCase):
         at.session_state.configs={t.id:c,b.id:bc,u.id:uc}
         at.session_state.settings['axis']='原始'
         at.session_state.revision+=1
+        at.session_state.settings_draft=new_draft(at.session_state.revision)
         at.run()
         return at,t,b,u
 
@@ -39,7 +41,7 @@ class RingAppTests(unittest.TestCase):
 
     def ring_page(self,at):
         at.switch_page('app_pages/curves.py').run()
-        widget(at.selectbox,'绘制通道').set_value('环电流').run()
+        widget(at.segmented_control,'绘制通道').set_value('环电流').run()
         widget(at.selectbox,'按组筛选').set_value('全部').run()
         self.clean(at)
 
@@ -96,27 +98,35 @@ class RingAppTests(unittest.TestCase):
         widget(at.segmented_control,'参数设置').set_value('扫描与背景').run()
         widget(at.selectbox,'要检查的文件').set_value(t.id).run()
         self.assertEqual(widget(at.selectbox,'背景模式').value,'盘环配对背景')
-        widget(at.selectbox,'盘环配对背景文件').set_value(b.id).run()
+        widget(at.selectbox,'背景文件（盘扣盘、环扣环）').set_value(b.id).run()
         self.assertIsNone(at.session_state.configs[t.id]['background_ring'])
-        widget(at.button,'应用扫描与背景设置').click().run()
+        self.assertTrue(at.session_state.settings_draft['configs'])
+        widget(at.button,'应用设置').click().run()
         self.assertEqual(at.session_state.configs[t.id]['background_disk'],b.id)
         self.assertEqual(at.session_state.configs[t.id]['background_ring'],b.id)
         widget(at.selectbox,'背景模式').set_value('分别指定背景').run()
-        widget(at.selectbox,'环背景（单列背景按其唯一电流列）').set_value('').run()
-        widget(at.button,'应用扫描与背景设置').click().run()
+        widget(at.selectbox,'环背景文件').set_value('').run()
+        widget(at.button,'应用设置').click().run()
         self.assertEqual(at.session_state.configs[t.id]['background_disk'],b.id)
         self.assertIsNone(at.session_state.configs[t.id]['background_ring'])
         self.clean(at)
 
     def test_metadata_paired_commit_is_atomic_and_preserves_independent_rows(self):
         at,t,b,u=self.app()
-        # Existing table rows with a paired disk choice exercise the batch
-        # commit path; the ring association is filled only on Apply.
-        at.session_state.configs[t.id]['background_disk']=b.id
+        # Simulate a real edit of the unified metadata table, then commit all
+        # staged fields once. The old independent row must stay independent.
         at.session_state.configs[u.id].update(background_mode='independent',background_ring=b.id)
         at.session_state.revision+=1
+        at.session_state.settings_draft=new_draft(at.session_state.revision)
         at.run()
-        widget(at.button,'确认并应用分组与背景').click().run()
+        editor_key=f'metadata_{at.session_state.revision}_{at.session_state.draft_epoch}'
+        row_index=list(at.session_state.traces).index(t.id)
+        background_label=at.session_state.traces[b.id].name+' · '+b.id[:4]
+        at.session_state[editor_key]={'edited_rows':{row_index:{'背景文件':background_label}},'added_rows':[],'deleted_rows':[]}
+        at.run()
+        self.assertIsNone(at.session_state.configs[t.id]['background_disk'])
+        self.assertIsNone(at.session_state.configs[t.id]['background_ring'])
+        widget(at.button,'应用设置').click().run()
         self.assertEqual(at.session_state.configs[t.id]['background_ring'],b.id)
         self.assertIsNone(at.session_state.configs[u.id]['background_disk'])
         self.assertEqual(at.session_state.configs[u.id]['background_ring'],b.id)
