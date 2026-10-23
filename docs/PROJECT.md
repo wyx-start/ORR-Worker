@@ -1,6 +1,8 @@
 # ORR Worker 项目说明
 
-版本：1.6.0。首次交付：2026-10-14；1.5.0 环图与配对背景于 2026-10-18 实现、2026-10-19 复核。本轮统一设置草稿、组合操作和 Origin 绘图 CSV。本文件供后续开发者或 Codex 会话继续改进。
+已发布版本：1.6.0；当前开发工作区：1.7.0-dev。首次交付：2026-10-14；1.5.0 环图与配对背景于 2026-10-18 实现、2026-10-19 复核。1.6.0 完成统一设置草稿、组合操作和 Origin 绘图 CSV。本文件供后续开发者或 Codex 会话继续改进。
+
+Qoder 的两个 UI 文件及三个新测试已集成；Codex 独立复核了 247 项交付基线，并落实 RRDE 默认值、界面精简、批量扫描／背景与转速人工修正。设计见 [任务文档](tasks/SIMPLIFY_RRDE_AND_BATCH_SCAN_BACKGROUND.md)，最终覆盖与限制见 [验证记录](VALIDATION_1.7.0_DEV.md)。本轮由 Codex 统一修改并验收，未向外部代理发送消息。
 
 ## 1. 已确认的需求与边界
 
@@ -27,7 +29,7 @@
 | 条件输入 | 根据当前页面/纵轴显示必要条件，必填标注 *；其余高级设置折叠 |
 | 设置生效 | 文件配置与全局坐标先汇入共享草稿，统一应用；来源和目标分开，默认当前组，切换不自动复制 |
 | 组合操作 | 有草稿时支持应用并计算／导出／保存项目；分析先做任务预检查，合法缺项记录可单独应用保存 |
-| 常用条件 | 载入到草稿，默认不覆盖人工非空值；一个保存入口选择项目／本机，不继承核对状态 |
+| 条件精简 | 移除四个指定区块；原电解液、参数来源、预设与旧有效阈值保留；N 默认 0.369，可修改 |
 | 平滑 | 默认关闭；仅极化曲线绘图 SG 二阶；11/21/51 点或自定义奇数窗口 |
 | K–L | 表观 n；2e/4e 标为两路径模型估算 |
 | RRDE | 过氧化物产率、n、两产物模型下的四电子比例 |
@@ -92,7 +94,7 @@ orr_workbench/
   tests/test_smoothing.py    已知信号、缺口、短段、非均匀采样、关闭行为
   tests/test_rpm.py          转速写法、边界、来源、补空白与旧项目兼容
   tests/test_conditions.py   默认面积、用途校验、预设、隐藏参数及旧项目面积兼容
-  tests/test_condition_draft.py  来源／范围隔离、预设接续手改、错误保留及统一提交
+  tests/test_condition_draft.py  来源／范围隔离、隐藏记录保护、错误保留及统一提交
   tests/test_settings_draft.py   纯候选状态、冲突与事务校验
   tests/test_shared_draft_ui.py  共享候选、组合操作、错误与修订的界面回归
   tests/test_origin_export.py    独立网格、显示变量、缺口和数值 CSV 回读
@@ -305,7 +307,7 @@ raw/<id>.txt
 | Ar-5mv-beijing.txt | 5000 | −1.15 ～ 0.1 | Potential/V, Current/A |
 | 盘环-o-CS-第二个电极.txt | 4000 | −0.9 ～ 0.1 | Potential/V, i1/A, i2/A |
 
-全部为 CV、4 段、5 mV/s、1 mV 采样步。盘环文件第二电极设定为 0.2 V，但没有写明物理盘环接线、参比、pH、N、面积或转速。pH/N 等仍需用户提供；5 mm 几何尺寸是用户指定的软件默认，不是从文件测得。测试条件不是实际实验结论。
+全部为 CV、4 段、5 mV/s、1 mV 采样步。盘环文件第二电极设定为 0.2 V，但没有写明物理盘环接线、参比、pH、N、面积或转速。这些文件未提供的条件不视为已测得；当前 pH 13、SCE（饱和 KCl，25 °C）、N=0.369 与 5 mm 几何尺寸均为用户指定的软件默认，可按实际实验修改。测试条件不是实际实验结论。
 
 测试命令：
 
@@ -335,7 +337,13 @@ raw/<id>.txt
 
 ## 9. 后续会话接手清单
 
-1.6.0 的已确认设计和完成记录见 [操作简化工作计划](tasks/UI_SIMPLIFICATION_WORK_PLAN.md)。后续修改入口应先理解 `settings_draft`、UI 暂存包装、候选任务检查及下载字节交接：同一编辑器的后续手改可以更新草稿，独立编辑域的矛盾修改必须显式解决；一次组合动作不能读到旧结果，也不能因输入暂存后无条件重跑而吞掉下载事件。项目 schema 仍为 1，草稿状态本身不序列化。
+1.7.0-dev 新增 background_conditions.py：平铺条件保存独立记录，resolved_configs 只返回有效投影；controlled_fields／field_states.editable 统一权限，不能以 following 状态代替。candidate、pending_candidate、项目保存／恢复返回持久化记录；invalidate 不再回写继承值。新 writer 使用 schema=2，reader 兼容 1、2；旧仅 pH 规则以 legacy_ph 保留，旧 follow 未保存的独立 pH 记未知并归档原派生快照。
+
+ui_shared.get_draft_view 同时给出依据一致的 records、configs、settings，失败时真实回退到已应用快照，分域编辑输入另存。控件使用 get_edit_configs/get_edit_settings 修复，不能用回退摘要重置输入。stage_config_updates(..., replace=True) 支持模式切换时替换本域该文件的旧补丁；reject_config_updates 保留本地失败并防止过时重放。预设读取解析后的有效条件；process_trace 与 parameter_record 记录实际使用的背景快照。
+
+核心阶段历史基线为 77 项新增检查、235 项中 234 项通过；Qoder 接入后修复剩余面积输入问题，交付 247 项通过。Codex 已独立重跑 247 项基线；本轮新增与最终结果见 VALIDATION_1.7.0_DEV.md。验证继续使用 tools/verify_background_conditions.py 的隔离源码、程序生成的合成 examples 和独立预设路径，不读取真实实验 TXT／本机预设。本次按用户授权同步 GitHub 源码，详见 PUBLICATION.md。
+
+1.6.0 的已确认设计和完成记录见 [操作简化工作计划](tasks/UI_SIMPLIFICATION_WORK_PLAN.md)。后续修改入口应先理解 `settings_draft`、UI 暂存包装、候选任务检查及下载字节交接：同一编辑器的后续手改可以更新草稿，独立编辑域的矛盾修改必须显式解决；一次组合动作不能读到旧结果，也不能因输入暂存后无条件重跑而吞掉下载事件。1.6.0 当时项目 schema 为 1；当前开发版已迁移到 schema=2，草稿状态本身不序列化。
 
 1.5.0 的环图与背景配对见 [任务及完成记录](tasks/RING_CURRENT_COMPARISON_AND_PAIRED_BACKGROUND.md)。新增 `background_pairing.py` 提供原子绑定校验，`ring_comparison.py` 只比较已知条件，不把未知判为一致；数值比较采用小容差，文本做空白与大小写规范化，不猜电解液等价。
 
@@ -353,3 +361,23 @@ K–L 异常结果的排查记录见 [参数审查](tasks/KL_PARAMETER_AUDIT.md)
 4. 修改配置时检查 `default_config`、项目序列化、表单和结果失效四处是否同步。
 5. 重跑相关测试；页面变动用真实浏览器检查图、表格和下载。
 6. 更新本文件和 CHANGELOG，记录新增字段、schema 变化及未解决限制。
+
+## 1.7.0 开发版：本轮实施说明
+
+- `batch_settings.build_batch_updates` 是纯补丁构建与预检查接口，返回全部目标的补丁和预览；非法批次整次拒绝，自动扫描失败另记为可人工修正的状态。
+- `settings_editor.batch_scan_background_form` 管理当前组／全部样品／自选范围；各项默认保持，明确 A/B 清除所选人工段并逐文件重算。逐文件入口保留，不再使用旧“统一当前组扫描”复选框。
+- `stage_config_updates` 新增 `replace_domain`，只替换本批量编辑域；`retain_intent` 保留明确选择但等于已应用值的意图，确保与其他域的反向修改仍报冲突。此类拒绝不自动重放，需用户统一或重新加入。
+- `stage_background_mode` 只清理同一背景的条件策略相关字段及来源，不再删除同域面积、电解液或其他目标记录；失败恢复原草稿。
+- 新导入 RRDE 的 `collection_efficiency=.369`，来源为软件默认。项目读取保持原 N（包括空白）；RRDE 编辑只为缺项提供默认草稿，非空记录不随默认覆盖。旧阈值仍从 `settings.rrde.floor_A` 读取，缺失才用 1e-9 A。
+- `condition_ui` 删除补充记录与常用预设 UI，隐藏字段不再参与普通条件复制；预设后端兼容能力不删除。K–L 按需展示电解液差异修正，其他字段仍由相应设置入口修正。
+- 导入页将 rpm 列显式设为 float，确保整列为空时仍是可编辑数值列；非法输入捕获后整表拒绝。`set_manual_rpm` 保留原匹配／候选，人工非空值优先；只有显式补全空白才重新尝试识别。
+- 完整处理数据新增 `rpm` 与 `rpm_source`；Origin 绘图 CSV 保持独立 XY 布局。RRDE 完整表同样携带实际转速和来源。
+- `tools/verify_simplified_browser.py` 仅接受 verification 下已有隔离回归副本，在自有 8766 服务运行合成流程，结束必停，不读取 `.runtime/server.json` 或操作用户会话。
+
+### 2026-10-23 补充：SCE／pH 默认与转速详情精简
+
+`default_config` 对新导入记录使用 pH=13、SCE／饱和 KCl、ref_V_SHE=0.241、reference_preset_C=25，并标为用户指定的软件默认。参比来源沿用既有 SCE 内置预设。`unpack_project` 在合并保存值前恢复原历史缺项基线，避免老项目缺字段被新默认补写；保存的人工值和 None 原样保留。背景的有效条件仍按既定跟随／独立策略解析。
+
+导入页删除转速识别详情折叠区；不删除 rpm_matches、rpm_candidates 等审计字段，数值表格与人工优先规则不变。新增 test_default_reference 的 5 项检查覆盖实际新导入 UI、SCE 温度限制、来源、旧值／空值／缺字段与删除区块；旧缺条件测试通过 unconfigured_conditions 显式创建历史缺项夹具，不再依赖生产初始值为空。最终全量 277 项通过，浏览器证据见 VALIDATION_1.7.0_DEV.md。
+
+发布验证补充：tools/verify_background_conditions.py 直接调用 tools/generate_demo_data.py 在新隔离目录生成合成示例；包含 tools 本身的副本，不读取工作区真实 examples，也不依赖私有 .release 路径。

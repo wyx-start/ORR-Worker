@@ -12,11 +12,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from background_ph import (activate_ph_links, finite_ph, synchronize_ph_links)
+from background_conditions import canonical_configs, resolved_configs
 from background_pairing import apply_background_binding
 
 from orr_core import (DataError, VERSION, default_config, json_bytes, parameter_record,
-                      parse_chi, process_trace, scan_segments, select_segment)
+                      parse_chi, process_trace, scan_segments, select_segment, migrate_background_config)
 
 ROOT = Path(__file__).resolve().parent
 REFERENCE_PRESETS = {
@@ -38,6 +38,16 @@ def initialize():
     st.session_state.setdefault("settings_draft", new_draft(st.session_state.revision))
     st.session_state.setdefault("draft_epoch", 0)
     st.session_state.setdefault("workspace_epoch", 0)
+    if any("background_conditions_mode" not in cfg for cfg in st.session_state.configs.values()):
+        st.session_state.configs = {
+            ident: migrate_background_config(cfg, schema=1)
+            if "background_conditions_mode" not in cfg else cfg
+            for ident, cfg in st.session_state.configs.items()}
+        # Migration preserves scientific values and pending edit domains, but
+        # previously generated exports do not carry the new audit structure.
+        st.session_state.results = {}
+        st.session_state.exports = {}
+        st.session_state.settings_notice = "旧会话已按兼容规则恢复，独立记录及草稿保留；分析结果请重新生成。"
 
 
 def _overlay(base, patch):
@@ -59,25 +69,74 @@ def _difference(value, base):
     return result
 
 
-def get_draft_configs():
+def get_draft_view():
+    """One detached source for records, effective conditions and provenance.
+
+    Failure displays the actual applied snapshot. Accepted and rejected edit
+    domains remain separately accessible; this view is never an apply fallback.
+    """
     from settings_draft import candidate
+    errors = [{"domain": domain, "message": str(message)}
+              for domain, message in st.session_state.get("draft_errors", {}).items()]
+    summary = st.session_state.get("draft_error")
+    if summary and not errors:
+        errors.append({"domain": None, "message": str(summary)})
+    rejected = deepcopy(st.session_state.get("rejected_config_edits", {}))
+    rejected_domains = list(dict.fromkeys([item["domain"] for item in errors if item["domain"] is not None]
+                                          + list(rejected)))
+    draft = st.session_state.settings_draft
+    records = canonical_configs(st.session_state.configs)
+    settings = deepcopy(st.session_state.settings)
     try:
-        configs, _ = candidate(st.session_state.settings_draft, st.session_state.traces,
-            st.session_state.configs, st.session_state.settings, st.session_state.revision)
-        return configs
-    except (DataError, ValueError, TypeError, IndexError):
-        # Invalid edits must remain visible and repairable; processing still uses
-        # pending_candidate(), which refuses them instead of this UI fallback.
-        pass
-    result = deepcopy(st.session_state.configs)
-    for records in st.session_state.settings_draft.get("configs", {}).values():
-        for ident, patch in records.items():
+        pending = has_draft()
+    except (DataError, ValueError, TypeError) as exc:
+        pending = True
+        errors.append({"domain": None, "message": str(exc)})
+    if isinstance(draft, dict) and draft.get("base_revision") != st.session_state.revision:
+        pending = True
+        errors.append({"domain": None, "message": "草稿基于旧修订，请核对或放弃草稿后重新编辑。"})
+    basis = "applied_fallback" if errors or rejected else "applied"
+    if pending and not errors and not rejected:
+        try:
+            records, settings = candidate(draft, st.session_state.traces, records,
+                                          settings, st.session_state.revision)
+            basis = "candidate"
+        except (DataError, ValueError, TypeError, IndexError) as exc:
+            errors.append({"domain": None, "message": str(exc)})
+            basis = "applied_fallback"
+    configs = resolved_configs(records, {ident: trace.name for ident, trace in st.session_state.traces.items()})
+    return {"view_basis": basis, "revision": st.session_state.revision,
+            "has_pending": pending or bool(errors or rejected), "records": records,
+            "configs": configs, "settings": settings, "errors": errors,
+            "rejected_domains": rejected_domains,
+            "staged_edits": deepcopy(draft.get("configs", {})) if isinstance(draft, dict) else {},
+            "staged_setting_edits": deepcopy(draft.get("settings", {})) if isinstance(draft, dict) else {},
+            "rejected_edits": rejected}
+
+
+def get_draft_configs():
+    return get_draft_view()["configs"]
+
+
+def get_draft_settings():
+    return get_draft_view()["settings"]
+
+
+def get_edit_configs(domain=None):
+    """Unresolved records for controls only, including one rejected domain."""
+    result = canonical_configs(st.session_state.configs)
+    stages = list(st.session_state.settings_draft.get("configs", {}).values())
+    if domain is not None:
+        stages.append(st.session_state.get("rejected_config_edits", {}).get(domain, {}))
+    for files in stages:
+        for ident, patch in files.items():
             if ident in result:
                 result[ident] = _overlay(result[ident], patch)
     return result
 
 
-def get_draft_settings():
+def get_edit_settings():
+    """Raw settings for repairing controls only; never use for processing."""
     result = deepcopy(st.session_state.settings)
     for patch in st.session_state.settings_draft.get("settings", {}).values():
         result = _overlay(result, patch)
@@ -86,7 +145,9 @@ def get_draft_settings():
 
 def has_draft():
     from settings_draft import has_changes
-    return has_changes(st.session_state.settings_draft) or bool(st.session_state.get("draft_error"))
+    return has_changes(st.session_state.settings_draft) or bool(
+        st.session_state.get("draft_error") or st.session_state.get("draft_errors")
+        or st.session_state.get("rejected_config_edits"))
 
 
 def _draft_error_summary():
@@ -97,28 +158,55 @@ def _draft_error_summary():
         st.session_state.pop("draft_error", None)
 
 
-def stage_config_updates(domain, updates_by_id, _retry=True):
-    from settings_draft import stage_config
+def reject_config_updates(domain, updates_by_id, message, *, _retryable=False):
+    """Keep a failed editor operation visible without accepting any target."""
+    st.session_state.setdefault("draft_errors", {})[domain] = str(message)
+    if updates_by_id is not None:
+        st.session_state.setdefault("rejected_config_edits", {})[domain] = deepcopy(updates_by_id)
+    st.session_state.setdefault("draft_retryable_domains", {})[domain] = _retryable
+    _draft_error_summary()
+    return False
+
+
+def stage_config_updates(domain, updates_by_id, _retry=True, *, replace=False, replace_domain=False, retain_intent=False):
+    from settings_draft import candidate, DraftConflictError, stage_config, validate_config_patch
     draft = deepcopy(st.session_state.settings_draft)
     try:
+        if replace_domain:
+            draft.get("configs", {}).pop(domain, None)
+        if not isinstance(updates_by_id, dict):
+            raise DataError("文件修改必须是按文件标识组织的字典。")
+        stored = canonical_configs(st.session_state.configs)
         for ident, updates in updates_by_id.items():
+            if ident not in stored:
+                raise DataError("修改引用的文件已不存在。")
+            if not isinstance(updates, dict):
+                raise DataError("文件修改内容必须是字典。")
             old = draft.get("configs", {}).get(domain, {}).pop(ident, {})
-            patch = _difference(_overlay(old, updates), st.session_state.configs[ident])
+            combined = deepcopy(updates) if replace else _overlay(old, updates)
+            validate_config_patch(st.session_state.traces[ident], stored[ident], combined)
+            patch = combined if retain_intent else _difference(combined, stored[ident])
             if patch:
                 stage_config(draft, domain, ident, patch)
+        if not _retry:
+            # Only re-accept a previously conflicting operation when the whole
+            # proposed record is now valid. An unrelated edit must not clear a
+            # local validation error just because staging accepts raw numbers.
+            candidate(draft, st.session_state.traces, stored,
+                      st.session_state.settings, st.session_state.revision)
         st.session_state.settings_draft = draft
         st.session_state.setdefault("draft_errors", {}).pop(domain, None)
         st.session_state.setdefault("rejected_config_edits", {}).pop(domain, None)
+        st.session_state.setdefault("draft_retryable_domains", {}).pop(domain, None)
         _draft_error_summary()
         if _retry:
             for rejected_domain, values in list(st.session_state.get("rejected_config_edits", {}).items()):
-                stage_config_updates(rejected_domain, values, _retry=False)
+                if st.session_state.get("draft_retryable_domains", {}).get(rejected_domain):
+                    stage_config_updates(rejected_domain, values, _retry=False)
         return True
     except (DataError, ValueError, TypeError) as exc:
-        st.session_state.setdefault("draft_errors", {})[domain] = str(exc)
-        st.session_state.setdefault("rejected_config_edits", {})[domain] = deepcopy(updates_by_id)
-        _draft_error_summary()
-        return False
+        return reject_config_updates(domain, updates_by_id, exc,
+                                     _retryable=isinstance(exc, DraftConflictError) and not replace and not retain_intent)
 
 
 def stage_settings_updates(domain, updates):
@@ -139,21 +227,25 @@ def stage_settings_updates(domain, updates):
 
 def pending_candidate():
     from settings_draft import candidate
-    if st.session_state.get("draft_error"):
-        raise DataError(st.session_state.draft_error)
+    if (st.session_state.get("draft_error") or st.session_state.get("draft_errors")
+            or st.session_state.get("rejected_config_edits")):
+        raise DataError(st.session_state.get("draft_error") or "仍有未修正的编辑域，请核对错误与拒绝输入。")
+    if st.session_state.settings_draft.get("base_revision") != st.session_state.revision:
+        raise DataError("草稿基于旧修订，请核对或放弃草稿后重新编辑。")
     if not has_draft():
-        return deepcopy(st.session_state.configs), deepcopy(st.session_state.settings)
+        return canonical_configs(st.session_state.configs), deepcopy(st.session_state.settings)
     return candidate(st.session_state.settings_draft, st.session_state.traces,
                      st.session_state.configs, st.session_state.settings, st.session_state.revision)
 
 
 def apply_pending_settings(preflight=None):
     """Validate one immutable candidate, then commit both configs and settings."""
-    if not has_draft() and not st.session_state.get("draft_error"):
-        return True
+    dirty = has_draft()
     configs, settings = pending_candidate()
     if preflight is not None:
         preflight(configs, settings)
+    if not dirty:
+        return True
     st.session_state.configs = configs
     st.session_state.settings = settings
     invalidate()
@@ -199,6 +291,7 @@ def reset_draft():
     st.session_state.pop("draft_error", None)
     st.session_state.pop("draft_errors", None)
     st.session_state.pop("rejected_config_edits", None)
+    st.session_state.pop("draft_retryable_domains", None)
 
 
 def process_selected(ids, configs=None, settings=None, channels="all", subtract_background=True):
@@ -218,7 +311,6 @@ def process_selected(ids, configs=None, settings=None, channels="all", subtract_
 
 
 def invalidate():
-    synchronize_ph_links(st.session_state.configs, {k:t.name for k,t in st.session_state.traces.items()})
     st.session_state.revision += 1
     st.session_state.results = {}
     st.session_state.exports = {}
@@ -321,6 +413,8 @@ def merged_data(outputs):
         frame.insert(0, "file_id", ident)
         frame.insert(1, "filename", output["name"])
         frame.insert(2, "potential_axis", output["axis"])
+        frame.insert(3, "rpm", output["config"].get("rpm"))
+        frame.insert(4, "rpm_source", output["config"].get("rpm_source"))
         frames.append(frame)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
@@ -371,9 +465,14 @@ def axis_label(outputs):
     return "E / V (original reference)"
 
 
-def background_ph_panel(background_ids, prefix="shared"):
-    from settings_editor import background_ph_panel as render
+def background_conditions_panel(background_ids, prefix="shared"):
+    import settings_editor
+    render = getattr(settings_editor, "background_conditions_panel", settings_editor.background_ph_panel)
     return render(background_ids, prefix)
+
+
+def background_ph_panel(background_ids, prefix="shared"):
+    return background_conditions_panel(background_ids, prefix)
 
 
 def per_file_form():

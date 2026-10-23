@@ -7,11 +7,14 @@ import zipfile
 
 from background_ph import (activate_ph_links, default_ph_link, resolved_configs,
                            synchronize_ph_links)
+from background_conditions import (activate_links,
+                                   resolved_configs as resolved_conditions)
 from experiment_conditions import apply_conditions, snapshot_conditions
 from orr_core import (DataError, default_config, pack_project, parameter_record,
                       parse_chi, process_trace, unpack_project)
 
 ROOT = Path(__file__).resolve().parents[1]
+from unconfigured_conditions import unconfigured_config
 
 
 def configs():
@@ -138,19 +141,25 @@ class BackgroundPHTests(unittest.TestCase):
         self.assertIsNone(cfg["bg"]["pH"])
         self.assertEqual(len(cfg["bg2"]["background_ph_sources"]), 2)
 
-    def traces(self):
+    def traces(self, *, legacy_ph=False):
         paths = [ROOT/"examples"/name for name in ("O-0.1MNa-5mv-900.txt", "O-0.1MNa-5mv-1225.txt", "Ar-5mv-beijing.txt")]
         traces = [parse_chi(p.name, p.read_bytes()) for p in paths]
-        cfg = {t.id:default_config(t) for t in traces}
+        cfg = {t.id:unconfigured_config(t) for t in traces}
         for t in traces[:2]:
             cfg[t.id].update(pH=13., ref_V_SHE=.197, background_disk=traces[2].id)
         cfg[traces[2].id]["ref_V_SHE"] = .197
+        if legacy_ph:
+            cfg[traces[2].id]["background_conditions_mode"] = "legacy_ph"
         return traces, {t.id:t for t in traces}, cfg
 
     def test_core_resolves_ph_and_guards_conflict_even_with_raw_axis(self):
-        ts, traces, cfg = self.traces()
+        ts, traces, cfg = self.traces(legacy_ph=True)
         output = process_trace(ts[0], cfg[ts[0].id], traces, cfg, "RHE")
-        self.assertTrue(any("沿用关联样品 pH 13" in n for n in output["notes"]))
+        self.assertTrue(any("旧版仅 pH 跟随" in n for n in output["notes"]))
+        background = output["backgrounds"][ts[2].id]
+        self.assertEqual(background["config"]["pH"], 13.)
+        self.assertEqual(background["config"]["ref_V_SHE"], .197)
+        self.assertIsNone(background["stored_config"]["pH"])
         self.assertIsNone(cfg[ts[2].id]["pH"])  # core uses a read-only snapshot
         cfg[ts[1].id]["pH"] = 12.
         for axis in ("RHE", "原始"):
@@ -161,14 +170,25 @@ class BackgroundPHTests(unittest.TestCase):
         ts, traces, cfg = self.traces()
         project = pack_project(traces, cfg, {"axis":"RHE"})
         _, restored, _ = unpack_project(project)
-        self.assertEqual(restored[ts[2].id]["pH"], 13.)
-        self.assertEqual(restored[ts[2].id]["background_ph_mode"], "follow")
-        self.assertEqual(len(restored[ts[2].id]["background_ph_sources"]), 2)
-        record = parameter_record(traces, cfg, {})
-        bg = next(f["config"] for f in record["files"] if f["id"] == ts[2].id)
-        self.assertEqual(bg["pH"], 13.)
-        self.assertNotIn("background_ph_mode", snapshot_conditions(bg))
-        self.assertNotIn("background_ph_sources", snapshot_conditions(bg))
+        self.assertEqual(restored, cfg)  # Restore canonical records, never derived pH.
+        self.assertIsNone(restored[ts[2].id]["pH"])
+        self.assertEqual(restored[ts[2].id]["background_conditions_mode"], "follow")
+        self.assertNotIn("background_ph_sources", restored[ts[2].id])
+        effective = resolved_conditions(restored)[ts[2].id]
+        self.assertEqual(effective["pH"], 13.)
+        self.assertEqual(len(effective["background_conditions"]["linked_samples"]), 2)
+        output = process_trace(ts[0], cfg[ts[0].id], traces, cfg, "RHE")
+        for trace in ts[:2]:
+            cfg[trace.id]["pH"] = 12.
+        self.assertEqual(resolved_conditions(cfg)[ts[2].id]["pH"], 12.)
+        record = parameter_record(traces, cfg, {}, {ts[0].id:output})
+        bg = next(f for f in record["files"] if f["id"] == ts[2].id)
+        self.assertEqual(bg["config"]["pH"], 13.)  # Actual processed conditions.
+        self.assertIsNone(bg["stored_config"]["pH"])
+        self.assertEqual(bg["config_snapshot_basis"], "processed")
+        self.assertEqual(bg["background_conditions"]["effective"]["pH"], 13.)
+        self.assertNotIn("background_ph_mode", snapshot_conditions(bg["config"]))
+        self.assertNotIn("background_ph_sources", snapshot_conditions(bg["config"]))
 
     def test_legacy_project_preserves_empty_and_manual_values(self):
         ts, traces, cfg = self.traces()
@@ -181,19 +201,52 @@ class BackgroundPHTests(unittest.TestCase):
                     data = archive.read(name)
                     if name == "project.json":
                         value = json.loads(data)
+                        value["schema"] = 1
                         for f in value["files"]:
                             for key in list(f["config"]):
-                                if key.startswith("background_ph_"):
+                                if key.startswith(("background_ph_", "background_conditions_")):
                                     f["config"].pop(key)
                         data = json.dumps(value).encode()
                     dest.writestr(name, data)
             _, restored, _ = unpack_project(output.getvalue())
             bg = restored[ts[2].id]
             self.assertEqual(bg["pH"], ph)
+            self.assertEqual(bg["background_conditions_mode"], "legacy_ph")
             self.assertEqual(bg["background_ph_mode"], "manual")
-            activate_ph_links(restored, [ts[2].id])
-            synchronize_ph_links(restored)
-            self.assertEqual(bg["pH"], 13. if ph is None else 12.)
+            self.assertTrue(bg["background_ph_legacy"])
+            activate_links(restored, [ts[2].id])
+            self.assertEqual(bg["pH"], ph)  # Binding only updates policy flags.
+            effective = resolved_conditions(restored)[ts[2].id]
+            self.assertEqual(effective["pH"], 13. if ph is None else 12.)
+
+    def test_legacy_follow_snapshot_does_not_invent_independent_history(self):
+        ts, traces, cfg = self.traces(legacy_ph=True)
+        # Version 1 saved the old resolver's pH projection, including its source.
+        old_records = resolved_configs(cfg)
+        saved_source = old_records[ts[2].id]["parameter_sources"]["pH"]
+        raw = pack_project(traces, cfg, {})
+        output = BytesIO()
+        with zipfile.ZipFile(BytesIO(raw)) as archive, zipfile.ZipFile(output, "w") as dest:
+            for name in archive.namelist():
+                data = archive.read(name)
+                if name == "project.json":
+                    value = json.loads(data)
+                    value["schema"] = 1
+                    for item in value["files"]:
+                        item["config"] = {key:val for key,val in old_records[item["id"]].items()
+                                          if not key.startswith("background_conditions")}
+                    data = json.dumps(value).encode()
+                dest.writestr(name, data)
+        _, restored, _ = unpack_project(output.getvalue())
+        bg = restored[ts[2].id]
+        self.assertEqual(bg["background_conditions_mode"], "legacy_ph")
+        self.assertEqual(bg["background_ph_mode"], "follow")
+        self.assertIsNone(bg["pH"])
+        self.assertEqual(bg["background_conditions_migration"]["saved_ph_snapshot"], 13.)
+        self.assertEqual(bg["background_conditions_migration"]["saved_ph_source"], saved_source)
+        self.assertEqual(resolved_conditions(restored)[ts[2].id]["pH"], 13.)
+        bg["background_conditions_mode"] = "independent"
+        self.assertIsNone(resolved_conditions(restored)[ts[2].id]["pH"])
 
 
 if __name__ == "__main__":

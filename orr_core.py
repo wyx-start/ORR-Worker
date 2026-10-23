@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
+import copy
 import hashlib
 import json
 import math
@@ -10,14 +11,17 @@ from pathlib import Path
 import re
 import zipfile
 
-from background_ph import default_ph_link, ph_link_error, resolved_configs
+from background_ph import default_ph_link
+from background_conditions import (MODES as BACKGROUND_CONDITION_MODES, canonical_config,
+    canonical_configs, condition_error, default_background_conditions, resolved_configs)
 
 import numpy as np
 import pandas as pd
 
-VERSION = "1.6.0"
+VERSION = "1.7.0-dev"
 FARADAY = 96485.33212
 GAS_CONSTANT = 8.314462618
+SCE_REFERENCE_SOURCE = "https://www.metrohm.com/en_be/service/product-help-center/voltammetry/voltammetry---faqs.html"
 SOURCES = {
     "rrde": "https://www.nature.com/articles/s41467-022-30411-7",
     "kl_limits": "https://pubs.acs.org/doi/10.1021/acscatal.6b01581",
@@ -338,15 +342,21 @@ def default_config(trace: Trace) -> dict:
     return dict(name=stem, group=guess["group"], role=role, **{k:guess[k] for k in RPM_FIELDS},
                 direction="递减", mode="A", manual_segment=None, disk_channel=0,
                 ring_channel=1 if len(trace.columns) >= 3 else None,
-                disk_sign=-1, ring_sign=1, **default_ph_link(), area_cm2=math.pi * (5. / 20.)**2,
-                disk_diameter_mm=5., area_mode="diameter", collection_efficiency=None,
+                disk_sign=-1, ring_sign=1,
+                **{k:v for k,v in default_ph_link().items() if k in ("background_ph_mode", "background_ph_legacy")},
+                **default_background_conditions(), area_cm2=math.pi * (5. / 20.)**2,
+                disk_diameter_mm=5., area_mode="diameter", collection_efficiency=.369 if role == "RRDE" else None,
                 parameter_sources={"area_cm2":"软件默认：5 mm RDE（用户指定）",
                                    "disk_diameter_mm":"软件默认：5 mm RDE（用户指定）",
                                    "temperature_C":"软件默认：25 °C",
-                                   "potential_method":"软件默认：理论换算"},
-                reference="未设置", filling="", potential_method="理论换算", ref_V_SHE=None,
-                reference_source="用户输入", reference_preset_C=None,
-                pH=None, temperature_C=25., rhe_offset_V=None, electrolyte="",
+                                   "potential_method":"软件默认：理论换算",
+                                   "pH":"软件默认：pH 13（用户指定，可修改）",
+                                   **{field:"软件默认：SCE · 饱和 KCl · 25 °C（用户指定，可修改）"
+                                      for field in ("reference", "filling", "ref_V_SHE", "reference_source", "reference_preset_C")},
+                                   **({"collection_efficiency":"软件默认 0.369（可修改）"} if role == "RRDE" else {})},
+                reference="SCE", filling="饱和 KCl", potential_method="理论换算", ref_V_SHE=.241,
+                reference_source=SCE_REFERENCE_SOURCE, reference_preset_C=25.,
+                pH=13., temperature_C=25., rhe_offset_V=None, electrolyte="",
                 background_disk=None, background_ring=None, background_reviewed=False,
                 background_mode="paired" if role == "RRDE" else "independent",
                 ir_enabled=False, ir_ohm=0., ir_confirmed=False,
@@ -370,6 +380,8 @@ def rhe_shift(cfg):
         return 0.
     if method == "实测 RHE 总偏移":
         return require_number(cfg.get("rhe_offset_V"), "实测 RHE 总偏移（V）")
+    if method != "理论换算":
+        raise DataError("请选择有效的电位换算方式。")
     ph = require_number(cfg.get("pH"), "pH")
     temp = require_number(cfg.get("temperature_C"), "温度（°C）")
     if temp <= -273.15:
@@ -385,6 +397,8 @@ def potential_signature(cfg, axis):
         return ("RHE",)
     if cfg.get("potential_method") == "已是 RHE":
         return ("RHE",)
+    if cfg.get("potential_method") == "实测 RHE 总偏移":
+        return ("原始", "实测 RHE 总偏移", cfg.get("rhe_offset_V"))
     return ("原始", cfg.get("reference"), cfg.get("filling"), cfg.get("temperature_C"), cfg.get("ref_V_SHE"))
 
 
@@ -433,7 +447,11 @@ def interpolate(x, y, target):
 def process_trace(trace, cfg, traces, configs, axis="RHE", channels="all", subtract_background=True):
     if channels not in ("all", "disk", "ring"):
         raise DataError("无效的处理通道。")
-    configs = resolved_configs({**configs, trace.id:cfg}, {k:t.name for k,t in traces.items()})
+    try:
+        records = _stored_configs({**configs, trace.id:cfg})
+        configs = resolved_configs(records, {k:t.name for k,t in traces.items()})
+    except ValueError as exc:
+        raise DataError(f"背景实验条件记录无效：{exc}") from exc
     cfg = configs[trace.id]
     rows, e, disk, segment = base_curve(trace, cfg, axis, require_disk=channels != "ring")
     notes = list(trace.warnings)
@@ -459,6 +477,7 @@ def process_trace(trace, cfg, traces, configs, axis="RHE", channels="all", subtr
         result["I_ring_raw_A"] = ring
     if channels == "ring" and ring is None:
         raise DataError("没有有效的环电流通道。")
+    background_snapshots = {}
     for label, current in (("disk", disk), ("ring", ring)):
         if current is None:
             continue
@@ -472,12 +491,19 @@ def process_trace(trace, cfg, traces, configs, axis="RHE", channels="all", subtr
         if bgid not in traces or bgid == trace.id:
             raise DataError("背景文件不存在或错误地选择了自身。")
         bg, bgcfg = traces[bgid], configs[bgid]
-        link_error = ph_link_error(bgcfg)
+        link_error = condition_error(bgcfg)
         if link_error:
             raise DataError(f"背景“{bg.name}”：{link_error}")
-        if bgcfg.get("background_ph_detail"):
-            notes.append(f"背景 {bg.name}：{bgcfg['background_ph_detail']}")
-        if potential_signature(cfg, axis) != potential_signature(bgcfg, axis):
+        detail = bgcfg.get("background_conditions", {}).get("detail")
+        if detail:
+            notes.append(f"背景 {bg.name}：{detail}")
+        background_view = bgcfg.get("background_conditions", {})
+        follows_this_sample = (background_view.get("mode") == "follow" and
+                               any(source.get("id") == trace.id for source in background_view.get("linked_samples", [])))
+        # A globally resolved follow group already checks all known active
+        # conditions. Optional reference metadata can be missing on this sample
+        # and supplied by a compatible source without changing its coordinates.
+        if not follows_this_sample and potential_signature(cfg, axis) != potential_signature(bgcfg, axis):
             raise DataError("样品与背景原始参比不一致；请统一换算到 RHE 后再扣除。")
         try:
             b_rows, b_e, _, b_seg = base_curve(bg, bgcfg, axis, direction=segment["direction"], require_disk=label == "disk")
@@ -489,6 +515,13 @@ def process_trace(trace, cfg, traces, configs, axis="RHE", channels="all", subtr
             channel = 0
         if channel is None or not 0 <= int(channel) < b_rows.shape[1]-1:
             raise DataError(f"{'盘' if label == 'disk' else '环'}背景“{bg.name}”没有指定有效的对应电流通道。")
+        audit = background_snapshots.setdefault(bgid, {
+            "id":bgid, "filename":bg.name, "sha256":bg.sha256,
+            "config":copy.deepcopy(bgcfg), "stored_config":copy.deepcopy(records[bgid]),
+            "background_conditions":copy.deepcopy(bgcfg.get("background_conditions")),
+            "channels":[], "segments":{}})
+        audit["channels"].append(label)
+        audit["segments"][label] = copy.deepcopy(b_seg)
         # Convert the background to the sample's current-sign convention before subtraction.
         source_sign = bgcfg.get(f"{label}_sign", 1 if label == "ring" else -1)
         if label == "ring" and b_rows.shape[1] == 2:
@@ -525,9 +558,11 @@ def process_trace(trace, cfg, traces, configs, axis="RHE", channels="all", subtr
         result["I_ring_mA"] = result["I_ring_A"] * 1000
         result["I_ring_uA"] = result["I_ring_A"] * 1e6
     return {"data": result, "segment": segment, "notes": list(dict.fromkeys(notes)), "axis": axis,
-            "config": dict(cfg), "name": trace.name, "sha256": trace.sha256,
+            "config":copy.deepcopy(cfg), "stored_config":copy.deepcopy(records[trace.id]),
+            "background_conditions":copy.deepcopy(cfg.get("background_conditions")),
+            "backgrounds":background_snapshots, "name": trace.name, "sha256": trace.sha256,
             "scan_rate_V_s":trace.header.get("Scan Rate (V/s)"),
-            "processing":dict(channels=channels, subtract_background=subtract_background)}
+            "processing":dict(channels=channels, subtract_background=subtract_background, axis=axis)}
 
 
 def rrde_calculate(processed, cfg, floor_A=1e-9):
@@ -561,6 +596,23 @@ def rrde_calculate(processed, cfg, floor_A=1e-9):
     return df
 
 
+def kl_condition_differences(curves):
+    """Describe the exact strict comparisons used by the K-L calculation."""
+    fields = {"参比坐标":lambda c:potential_signature(c["config"], c["axis"]),
+              "pH":lambda c:c["config"].get("pH"),
+              "温度":lambda c:c["config"].get("temperature_C"),
+              "电解液":lambda c:c["config"].get("electrolyte"),
+              "面积":lambda c:c["config"].get("area_cm2"),
+              "扫描方向":lambda c:c["segment"]["direction"]}
+    rows = []
+    for field, getter in fields.items():
+        values = [getter(curve) for curve in curves]
+        if values and any(value != values[0] for value in values[1:]):
+            rows.extend({"字段":field, "文件":c.get("name", c["config"].get("name", "未命名")),
+                         "当前值":str(value)} for c,value in zip(curves, values))
+    return rows
+
+
 def kl_calculate(curves, potentials, C, D, nu):
     """cgs units: C mol/cm³, D and nu cm²/s; j A/cm², omega rad/s."""
     C = require_number(C, "氧浓度 C（mol/cm³）", True)
@@ -573,13 +625,17 @@ def kl_calculate(curves, potentials, C, D, nu):
     conditions = set()
     for curve in curves:
         cfg, frame = curve["config"], curve["data"]
-        rpms.append(require_number(cfg.get("rpm"), "转速 rpm", True))
+        try:
+            rpms.append(require_number(cfg.get("rpm"), "转速 rpm", True))
+        except DataError as exc:
+            raise DataError(f"{curve.get('name', cfg.get('name', '未命名'))}：{exc} 请在导入页手动填写实际转速。") from exc
         area = require_number(cfg.get("area_cm2"), "盘面积 cm²", True)
         signatures.add(potential_signature(cfg, curve["axis"]))
         conditions.add((cfg.get("pH"), cfg.get("temperature_C"), cfg.get("electrolyte"), curve["segment"]["direction"], area))
         currents.append(interpolate(frame.E_V.to_numpy(), frame.I_disk_A.to_numpy() * int(cfg.get("disk_sign", -1)) / area, potentials))
     if len(signatures) != 1 or len(conditions) != 1:
-        raise DataError("K–L 所选文件的参比坐标、pH、温度、电解液、面积或扫描方向不一致。")
+        detail = "；".join(f"{r['文件']} {r['字段']}={r['当前值']}" for r in kl_condition_differences(curves))
+        raise DataError("K–L 所选文件的参比坐标、pH、温度、电解液、面积或扫描方向不一致。"+detail)
     if len(set(rpms)) != len(rpms):
         raise DataError("同一拟合中存在重复转速；请每个转速选择一条曲线。")
     omega = 2 * np.pi * np.asarray(rpms) / 60
@@ -641,9 +697,60 @@ def json_bytes(value):
     return json.dumps(clean_json(value), ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
 
 
+def migrate_background_config(cfg, schema=1):
+    """Return a canonical record, preserving legacy pH behavior and provenance.
+
+    ``schema=1`` is also the explicit migration for a live 1.6 session that has
+    no new mode field.  Never infer independence from equality with a sample.
+    """
+    if not isinstance(cfg, dict):
+        raise DataError("项目参数结构不正确。")
+    if type(schema) is not int or schema not in (1, 2):
+        raise DataError("项目版本或结构不支持。")
+    result = canonical_config(cfg)
+    sources = result.get("parameter_sources", {})
+    if not isinstance(sources, dict):
+        raise DataError("实验条件来源记录必须是字典。")
+    if schema == 1:
+        result["background_conditions_mode"] = "legacy_ph"
+        result["background_conditions_migration"] = {}
+        if "background_ph_mode" not in result:
+            result.update(background_ph_mode="manual", background_ph_legacy=True)
+        else:
+            result.setdefault("background_ph_legacy", False)
+        if result["background_ph_mode"] == "follow" and result.get("role") == "背景":
+            result["background_conditions_migration"] = {
+                "source_schema":1,
+                "saved_ph_snapshot":copy.deepcopy(result.get("pH")),
+                "saved_ph_source":copy.deepcopy(sources.get("pH")),
+                "independent_ph_status":"unknown_legacy_follow"}
+            result["pH"] = None
+            result.setdefault("parameter_sources", {})["pH"] = "旧项目未保存独立 pH；原派生快照已保留在迁移记录中"
+    elif result.get("background_conditions_mode") not in BACKGROUND_CONDITION_MODES:
+        raise DataError("项目的背景实验条件策略无效或缺失。")
+    if result.get("background_conditions_mode") == "legacy_ph":
+        if result.get("background_ph_mode") not in ("auto", "follow", "manual"):
+            raise DataError("项目的旧版背景 pH 策略无效或缺失。")
+        if not isinstance(result.get("background_ph_legacy", False), bool):
+            raise DataError("项目的旧版背景 pH 兼容标记无效。")
+    if not isinstance(result.get("background_conditions_migration", {}), dict):
+        raise DataError("项目的背景条件迁移记录无效。")
+    result.setdefault("background_conditions_migration", {})
+    return result
+
+
+def _stored_configs(configs):
+    records = canonical_configs(configs)
+    return {ident:migrate_background_config(cfg, 2 if "background_conditions_mode" in cfg else 1)
+            for ident,cfg in records.items()}
+
+
 def pack_project(traces, configs, settings):
-    configs = resolved_configs(configs, {k:t.name for k,t in traces.items()})
-    manifest = dict(schema=1, app_version=VERSION, settings=settings, files=[])
+    """Write schema 2 canonical records, never effective background projections."""
+    configs = _stored_configs(configs)
+    if traces.keys() != configs.keys() or not isinstance(settings, dict):
+        raise DataError("文件、配置或全局设置结构不一致，无法保存项目。")
+    manifest = dict(schema=2, app_version=VERSION, settings=copy.deepcopy(settings), files=[])
     output = BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         for ident, trace in traces.items():
@@ -660,27 +767,42 @@ def unpack_project(raw):
             if len(archive.infolist())>250 or sum(i.file_size for i in archive.infolist())>100_000_000:
                 raise DataError("项目过大，请分批保存和载入。")
             manifest = json.loads(archive.read("project.json"))
-            if manifest.get("schema") != 1 or not isinstance(manifest.get("settings"), dict):
+            if not isinstance(manifest, dict):
                 raise DataError("项目版本或结构不支持。")
+            schema = manifest.get("schema")
+            if type(schema) is not int or schema not in (1, 2) or not isinstance(manifest.get("settings"), dict):
+                raise DataError("项目版本或结构不支持。")
+            if not isinstance(manifest.get("files"), list):
+                raise DataError("项目文件列表结构不正确。")
             traces, configs = {}, {}
             for entry in manifest["files"]:
                 trace = parse_chi(entry["name"], archive.read(entry["path"]))
                 if trace.sha256 != entry["sha256"] or trace.id != entry["id"]:
                     raise DataError("项目原始数据校验失败。")
                 defaults = default_config(trace)
+                # New-import defaults must never fill unknown historical conditions.
+                defaults.update(pH=None, reference="未设置", filling="", ref_V_SHE=None,
+                                reference_source="用户输入", reference_preset_C=None)
+                for field in ("pH", "reference", "filling", "ref_V_SHE", "reference_source", "reference_preset_C"):
+                    defaults["parameter_sources"].pop(field, None)
                 if not isinstance(entry["config"], dict):
                     raise DataError("项目参数结构不正确。")
-                defaults.update({k:v for k,v in entry["config"].items() if k in defaults})
+                saved = entry["config"]
+                migration_input = copy.deepcopy(saved)
+                migration_input.setdefault("role", defaults["role"])
+                migrated = migrate_background_config(migration_input, schema)
+                defaults.update({k:v for k,v in migrated.items() if k in defaults})
+                # Loading a saved project never assigns a new calibration value.
+                defaults["collection_efficiency"] = saved.get("collection_efficiency")
+                if saved.get("collection_efficiency") is None:
+                    defaults["parameter_sources"].pop("collection_efficiency", None)
                 if "background_mode" not in entry["config"]:
                     defaults["background_mode"] = "independent"
-                if "background_ph_mode" not in entry["config"]:
-                    # Existing values and empty records remain independent until
-                    # a user explicitly enables following or confirms a binding.
-                    defaults.update(background_ph_mode="manual", background_ph_legacy=True)
                 if "parameter_sources" not in entry["config"]:
                     defaults["parameter_sources"] = {k:"项目保存值，来源未记录" for k in
                         ("area_cm2", "temperature_C", "potential_method", "pH", "ref_V_SHE", "collection_efficiency")
-                        if entry["config"].get(k) is not None}
+                        if migrated.get(k) is not None}
+                    defaults["parameter_sources"].update(migrated.get("parameter_sources", {}))
                 if "disk_diameter_mm" not in entry["config"]:
                     # Never reinterpret a legacy area (including an empty one)
                     # as the new default electrode geometry.
@@ -693,8 +815,8 @@ def unpack_project(raw):
                                     rpm_status="saved",rpm_matches=[],rpm_candidates=[],
                                     rpm_note="项目保存值，来源未记录；未重新识别覆盖。")
                 traces[trace.id] = trace
-                configs[trace.id] = defaults
-            return traces, resolved_configs(configs, {k:t.name for k,t in traces.items()}), manifest["settings"]
+                configs[trace.id] = canonical_config(defaults)
+            return traces, configs, manifest["settings"]
     except DataError:
         raise
     except (ValueError, KeyError, TypeError, zipfile.BadZipFile, OSError) as exc:
@@ -702,14 +824,35 @@ def unpack_project(raw):
 
 
 def parameter_record(traces, configs, settings, processed=None):
-    configs = resolved_configs(configs, {k:t.name for k,t in traces.items()})
-    return dict(app_version=VERSION, sources=SOURCES, settings=settings,
+    """Audit stored records alongside effective conditions used by each result."""
+    records = _stored_configs(configs)
+    configs = resolved_configs(records, {k:t.name for k,t in traces.items()})
+    processed = processed or {}
+    used_backgrounds = {}
+    for output in processed.values():
+        for ident, audit in output.get("backgrounds", {}).items():
+            prior = used_backgrounds.get(ident)
+            if prior is not None and prior.get("config") != audit.get("config"):
+                raise DataError("共享背景的历史处理条件不一致，请重新处理后再导出参数。")
+            used_backgrounds[ident] = audit
+    files = []
+    for ident, trace in traces.items():
+        output = processed.get(ident, {})
+        used = output if "config" in output else used_backgrounds.get(ident, {})
+        effective = copy.deepcopy(used.get("config", configs[ident]))
+        stored = copy.deepcopy(used.get("stored_config", canonical_config(effective) if used else records[ident]))
+        files.append(dict(id=ident, filename=trace.name, sha256=trace.sha256,
+                          columns=copy.deepcopy(trace.columns), encoding=trace.encoding,
+                          header=copy.deepcopy(trace.header), config=effective, stored_config=stored,
+                          background_conditions=copy.deepcopy(effective.get("background_conditions")),
+                          backgrounds=copy.deepcopy(output.get("backgrounds", {})),
+                          config_snapshot_basis="processed" if used else "current",
+                          selected_segment=copy.deepcopy(output.get("segment")),
+                          processing=copy.deepcopy(output.get("processing")),
+                          notes=copy.deepcopy(output.get("notes", []))))
+    return dict(app_version=VERSION, project_schema=2, sources=copy.deepcopy(SOURCES), settings=copy.deepcopy(settings),
                 formulas={"RHE": "E_vs_ref + E_ref_vs_SHE(T) + 2.303RT/F*pH; calibrated total offset is used alone",
                           "RRDE": "H2O2%=200*(R/N)/(D+R/N); n=4*D/(D+R/N); D,R are signed-background-corrected positive reaction magnitudes",
                           "KL": "1/j = 1/jk + 1/(0.62*n*F*D^(2/3)*nu^(-1/6)*C) * omega^(-1/2); omega=2*pi*rpm/60",
                           "ir": "E_corr=E_raw-I_anodic_positive_raw*R_remaining; before background subtraction"},
-                files=[dict(id=k, filename=t.name, sha256=t.sha256, columns=t.columns, encoding=t.encoding,
-                            header=t.header, config=configs[k],
-                            selected_segment=(processed or {}).get(k, {}).get("segment"),
-                            processing=(processed or {}).get(k, {}).get("processing"),
-                            notes=(processed or {}).get(k, {}).get("notes", [])) for k,t in traces.items()])
+                files=files)

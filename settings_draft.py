@@ -11,8 +11,13 @@ import math
 from numbers import Integral, Real
 
 from background_pairing import apply_background_binding
-from background_ph import MODES, activate_ph_links, resolved_configs
-from orr_core import DataError, scan_segments
+from background_ph import MODES as PH_MODES
+from background_conditions import MODES, activate_links, canonical_configs, controlled_fields
+from orr_core import DataError, default_config, migrate_background_config, scan_segments
+
+
+class DraftConflictError(DataError):
+    """A rejected domain may be retried when its conflicting peer is edited."""
 
 
 def new_draft(base_revision):
@@ -75,13 +80,13 @@ def _check_conflicts(draft):
             for ident in files.keys() & other_files.keys():
                 field = _conflict(files[ident], other_files[ident])
                 if field:
-                    raise DataError(f"文件 {ident} 的 {field} 在“{domain}”与“{other_domain}”中有矛盾修改，请先统一。")
+                    raise DraftConflictError(f"文件 {ident} 的 {field} 在“{domain}”与“{other_domain}”中有矛盾修改，请先统一。")
     entries = list(draft["settings"].items())
     for index, (domain, patch) in enumerate(entries):
         for other_domain, other_patch in entries[index + 1:]:
             field = _conflict(patch, other_patch)
             if field:
-                raise DataError(f"全局 {field} 在“{domain}”与“{other_domain}”中有矛盾修改，请先统一。")
+                raise DraftConflictError(f"全局 {field} 在“{domain}”与“{other_domain}”中有矛盾修改，请先统一。")
 
 
 def stage_config(draft, domain, ident, updates):
@@ -133,7 +138,8 @@ def _validate_config(ident, trace, cfg):
     for key, choices in (("role", ("样品", "RRDE", "背景")),
                          ("mode", ("A", "B")), ("direction", ("递增", "递减")),
                          ("background_mode", ("paired", "independent")),
-                         ("background_ph_mode", MODES),
+                         ("background_ph_mode", PH_MODES),
+                         ("background_conditions_mode", MODES),
                          ("potential_method", ("理论换算", "实测 RHE 总偏移", "已是 RHE")),
                          ("area_mode", ("area", "diameter"))):
         if key in cfg and cfg[key] not in choices:
@@ -154,6 +160,7 @@ def _validate_config(ident, trace, cfg):
         if key in cfg and not isinstance(cfg[key], bool):
             raise DataError(f"“{trace.name}”的 {key} 必须是明确的开关值。")
     _mapping(cfg.get("parameter_sources", {}), "参数来源")
+    _mapping(cfg.get("background_conditions_migration", {}), "背景迁移记录")
     _number(cfg, "pH", "pH")
     temp = _number(cfg, "temperature_C", "温度")
     if temp is not None and temp <= -273.15:
@@ -177,6 +184,37 @@ def _validate_config(ident, trace, cfg):
             raise DataError("人工扫描段必须是有效的段编号。")
         if manual not in {segment["segment"] for segment in scan_segments(trace)}:
             raise DataError(f"“{trace.name}”的手选扫描段不存在，请重新选择。")
+
+
+def validate_config_patch(trace, cfg, patch):
+    """Reject projections and writes to followed records, before any mutation.
+
+    Incomplete numeric/scan records are validated by ``candidate`` so that an
+    invalid draft remains available for repair. This guard covers persistence
+    and ownership of fields, including metadata-only changes to followed values.
+    """
+    _mapping(patch, "文件修改内容")
+    forbidden = {"background_conditions", "background_ph_status", "background_ph_sources",
+                 "background_ph_detail"}
+    unknown = set(patch) - set(default_config(trace))
+    if forbidden.intersection(patch) or unknown:
+        fields = sorted(forbidden.intersection(patch) | unknown)
+        raise DataError(f"“{trace.name}”包含不可写入的派生或未知字段：{'、'.join(fields)}。请以持久化记录构建补丁。")
+    updated = copy.deepcopy(cfg)
+    _merge(updated, patch)
+    blocked = controlled_fields(updated) if updated.get("role") == "背景" else set()
+    writes = {field for field in blocked if field in patch and patch[field] != cfg.get(field)}
+    source_patch = patch.get("parameter_sources", {})
+    if not isinstance(source_patch, dict):
+        raise DataError("参数来源必须是字典。")
+    original_sources = cfg.get("parameter_sources", {})
+    if not isinstance(original_sources, dict):
+        raise DataError("原记录的参数来源必须是字典。")
+    writes.update(field for field in blocked if field in source_patch
+                  and source_patch[field] != original_sources.get(field))
+    if writes:
+        raise DataError(f"“{trace.name}”的 {'、'.join(sorted(writes))} 正在跟随关联样品；请明确切到独立设置后，在同一草稿中修改。")
+    return updated
 
 
 def _validate_background_graph(configs):
@@ -220,7 +258,10 @@ def candidate(draft, traces, configs, settings, revision):
     if traces.keys() != configs.keys():
         raise DataError("文件与配置标识不一致，请重新载入项目。")
     _check_conflicts(draft)
-    proposed, global_settings = copy.deepcopy(configs), copy.deepcopy(settings)
+    stored = canonical_configs(configs)
+    stored = {ident: migrate_background_config(cfg, schema=1)
+              if "background_conditions_mode" not in cfg else cfg for ident, cfg in stored.items()}
+    proposed, global_settings = copy.deepcopy(stored), copy.deepcopy(settings)
     patches = {}
     for files in draft["configs"].values():
         for ident, patch in files.items():
@@ -232,6 +273,8 @@ def candidate(draft, traces, configs, settings, revision):
         _merge(global_settings, patch)
     if global_settings.get("axis", "RHE") not in ("RHE", "原始"):
         raise DataError("电位坐标必须是 RHE 或原始。")
+    for ident, patch in patches.items():
+        validate_config_patch(traces[ident], stored[ident], patch)
     for ident, cfg in proposed.items():
         _validate_config(ident, traces[ident], cfg)
     activated = []
@@ -248,6 +291,5 @@ def candidate(draft, traces, configs, settings, revision):
             cfg.update({field: checked[field] for field in (*binding_fields, "background_reviewed")})
             activated.extend((cfg.get("background_disk"), cfg.get("background_ring")))
     _validate_background_graph(proposed)
-    activate_ph_links(proposed, activated)
-    proposed = resolved_configs(proposed, {ident: trace.name for ident, trace in traces.items()})
+    activate_links(proposed, activated)
     return proposed, global_settings

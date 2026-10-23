@@ -1,12 +1,12 @@
 import streamlit as st
-from ui_shared import initialize, get_draft_settings, stage_settings_updates, has_draft
+from ui_shared import initialize, get_edit_settings, stage_settings_updates, has_draft
 
 st.set_page_config(page_title="ORR Worker", page_icon=":material/science:", layout="wide")
 initialize()
 with st.sidebar:
     st.title("ORR Worker")
     st.caption("辰华 CV · K–L · RRDE")
-    current_axis = get_draft_settings().get("axis", "RHE")
+    current_axis = get_edit_settings().get("axis", "RHE")
     axis = st.selectbox("分析与导出的电位坐标", ["RHE", "原始"], index=0 if current_axis=="RHE" else 1,
                         help="科学设置：修改后与本批条件一起应用。原始模式可预览数据。", key=f"axis_{st.session_state.revision}_{st.session_state.draft_epoch}",persist_state="session")
     stage_settings_updates("potential_axis", {"axis":axis})

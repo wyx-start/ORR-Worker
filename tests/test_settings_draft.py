@@ -3,7 +3,9 @@ import unittest
 
 import numpy as np
 
+from background_conditions import resolved_configs
 from orr_core import DataError, Trace, default_config
+from unconfigured_conditions import unconfigured_config
 from settings_draft import candidate, has_changes, new_draft, stage_config, stage_settings
 
 
@@ -16,7 +18,7 @@ def fixtures():
                                 [.5, -3e-4, 3e-6], [.25, -4e-4, 4e-6],
                                 [0., -5e-4, 5e-6]]), "utf-8", [])
         traces[name] = trace
-        configs[name] = default_config(trace)
+        configs[name] = unconfigured_config(trace)
     return traces, configs, {"axis": "RHE", "plot": {"color": "blue"}}
 
 
@@ -92,14 +94,21 @@ class SettingsDraftTests(unittest.TestCase):
             stage_config(self.draft, "bindings", ident, {"background_mode": "paired", "background_disk": self.bg})
         configs, _ = self.build()
         self.assertEqual(configs[self.a]["background_ring"], self.bg)
-        self.assertEqual(configs[self.bg]["background_ph_status"], "conflict")
         self.assertIsNone(configs[self.bg]["pH"])
+        self.assertNotIn("background_conditions", configs[self.bg])
+        self.assertNotIn("background_ph_status", configs[self.bg])
+        view = resolved_configs(configs)
+        self.assertEqual(view[self.bg]["background_conditions"]["status"], "conflict")
+        self.assertEqual({entry["value"] for entry in view[self.bg]["background_conditions"]
+                          ["field_states"]["pH"]["conflicts"]}, {12., 13.})
         self.assertIsNone(self.configs[self.a]["background_disk"])
 
-    def test_old_independent_background_and_manual_ph_are_not_migrated(self):
+    def test_legacy_independent_bindings_and_manual_ph_are_preserved(self):
         self.configs[self.a].pop("background_mode")
         self.configs[self.a].update(background_disk=self.bg, background_ring=self.bg2)
-        self.configs[self.bg].update(background_ph_mode="manual", pH=11.)
+        self.configs[self.bg].update(background_conditions_mode="legacy_ph",
+                                     background_ph_mode="manual", pH=11.)
+        self.configs[self.bg2]["background_conditions_mode"] = "legacy_ph"
         before = copy.deepcopy(self.configs)
         stage_config(self.draft, "conditions", self.a, {"pH": 13.})
         configs, _ = self.build()
@@ -107,15 +116,28 @@ class SettingsDraftTests(unittest.TestCase):
         self.assertEqual(configs[self.a]["background_disk"], self.bg)
         self.assertEqual(configs[self.a]["background_ring"], self.bg2)
         self.assertEqual(configs[self.bg]["pH"], 11.)
+        self.assertEqual(configs[self.bg]["background_conditions_mode"], "legacy_ph")
+        self.assertEqual(configs[self.bg]["background_ph_mode"], "manual")
+        self.assertEqual(resolved_configs(configs)[self.bg]["pH"], 11.)
         self.assertEqual(self.configs, before)
 
     def test_legacy_empty_background_only_adopts_follow_when_binding_is_explicit(self):
-        self.configs[self.bg].update(background_ph_mode="manual", background_ph_legacy=True)
+        self.configs[self.bg].update(background_conditions_mode="legacy_ph",
+                                     background_ph_mode="manual", background_ph_legacy=True)
         stage_config(self.draft, "conditions", self.a, {"pH": 0.})
+        unbound, _ = self.build()
+        self.assertEqual(unbound[self.bg]["background_ph_mode"], "manual")
+        self.assertTrue(unbound[self.bg]["background_ph_legacy"])
+        self.assertIsNone(unbound[self.bg]["pH"])
         stage_config(self.draft, "binding", self.a, {"background_disk": self.bg})
         configs, _ = self.build()
-        self.assertEqual(configs[self.bg]["pH"], 0.)
+        self.assertIsNone(configs[self.bg]["pH"])
         self.assertEqual(configs[self.bg]["background_ph_mode"], "follow")
+        self.assertEqual(configs[self.bg]["background_conditions_mode"], "legacy_ph")
+        self.assertFalse(configs[self.bg]["background_ph_legacy"])
+        self.assertEqual(resolved_configs(configs)[self.bg]["pH"], 0.)
+        self.assertIsNone(self.configs[self.bg]["pH"])
+        self.assertEqual(self.configs[self.bg]["background_ph_mode"], "manual")
 
     def test_invalid_candidate_does_not_mutate_any_supplied_state(self):
         stage_config(self.draft, "binding", self.a, {"background_disk": self.bg, "background_ring": self.bg})

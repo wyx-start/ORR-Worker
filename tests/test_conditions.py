@@ -9,6 +9,7 @@ import zipfile
 from experiment_conditions import (apply_conditions, area_from_diameter, load_profiles,
     missing_conditions, save_profile, snapshot_conditions)
 from orr_core import DataError, default_config, pack_project, parse_chi, process_trace, unpack_project
+from unconfigured_conditions import unconfigured_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def fixture():
     p = ROOT / "examples" / "O-0.1MNa-5mv-900.txt"
     t = parse_chi(p.name, p.read_bytes())
-    return t, default_config(t)
+    return t, unconfigured_config(t)
 
 
 class ConditionTests(unittest.TestCase):
@@ -125,6 +126,9 @@ class ConditionTests(unittest.TestCase):
                     value = src.read(name)
                     if name == "project.json":
                         data = json.loads(value)
+                        data["schema"] = 1
+                        data["files"][0]["config"].pop("background_conditions_mode", None)
+                        data["files"][0]["config"].pop("background_conditions_migration", None)
                         for key in ("disk_diameter_mm", "area_mode", "parameter_sources"):
                             data["files"][0]["config"].pop(key)
                         value = json.dumps(data).encode()

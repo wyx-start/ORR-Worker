@@ -7,11 +7,11 @@ import streamlit as st
 from condition_ui import common_parameter_form
 from download_ui import result_downloads
 from origin_export import effective_axis, csv_bytes, kl_fit_plot_table
-from orr_core import DataError, KOH_PRESET, SOURCES, json_bytes, kl_calculate
+from orr_core import DataError, KOH_PRESET, SOURCES, json_bytes, kl_calculate, kl_condition_differences
 from ui_shared import (apply_pending_settings, apply_settings_button, axis_label,
                        figure_style, file_formatter, get_draft_configs,
                        get_draft_settings, has_draft, offer_figure,
-                       pending_candidate, process_selected, require_files,
+                       pending_candidate, process_selected, require_files, get_draft_view,
                        show_errors, show_notes, store_table)
 
 
@@ -46,9 +46,31 @@ if selected:
 apply_settings_button(key=f"kl_apply_settings_{workspace}")
 
 # Common edits staged in this run are reflected in the selected-file preview.
-configs, settings = get_draft_configs(), get_draft_settings()
-outputs, errors = process_selected(selected, configs=configs, settings=settings, channels="disk")
+preview_view = get_draft_view()
+configs, settings = preview_view["configs"], preview_view["settings"]
+if preview_view["view_basis"] == "applied_fallback":
+    outputs, errors = {}, []
+    st.warning("草稿待修正；下方条件基于已应用设置，暂不生成分析预览。")
+else:
+    outputs, errors = process_selected(selected, configs=preview_view["records"], settings=settings, channels="disk")
 show_errors(errors)
+differences = kl_condition_differences(list(outputs.values()))
+if differences:
+    st.warning("所选文件条件不一致；请按下表核对。pH、参比和面积可在上方修改，扫描方向可在导入页修正。")
+    st.dataframe(differences, hide_index=True)
+    if any(row["字段"] == "电解液" for row in differences):
+        with st.expander("修正阻断计算的电解液差异"):
+            targets = st.multiselect("修正电解液的文件", selected, default=selected,
+                format_func=file_formatter(), key=f"kl_electrolyte_targets_{workspace}", persist_state="session")
+            source_text = preview_view["records"][selected[0]].get("electrolyte", "") if selected else ""
+            value = st.text_input("实际电解液与气氛记录", value=source_text,
+                key=f"kl_electrolyte_{workspace}", persist_state="session")
+            st.caption("仅修正明确选中的样品记录；请按真实实验填写，背景气氛不会随之修改。")
+            if st.button("将电解液修正加入草稿", disabled=not targets):
+                from ui_shared import stage_config_updates
+                if stage_config_updates("kl_electrolyte", {i:{"electrolyte":value,
+                    "parameter_sources":{"electrolyte":"用户修正 K–L 电解液差异"}} for i in targets}):
+                    st.success("已加入草稿，请统一应用设置或应用并计算。")
 if len(selected) < 2:
     clear_kl()
     st.info("请把至少两个不同转速文件设置为同一组，并在上方选择。")
@@ -62,7 +84,8 @@ with st.expander("核对实际参与计算的文件参数"):
         "扫描方向": outputs[ident]["segment"]["direction"] if ident in outputs else configs[ident].get("direction"),
         "处理状态": "可预览" if ident in outputs else "需要修正",
     } for ident in selected], hide_index=True)
-    st.caption(("草稿预览，尚未应用。" if has_draft() else "以上是已应用参数。")+
+    st.caption(("草稿待修正；以上是已应用参数。" if preview_view["view_basis"] == "applied_fallback"
+                else "草稿预览，尚未应用。" if has_draft() else "以上是已应用参数。")+
                "5 mm 盘对应约 0.19635 cm²；转速填 rpm，程序自动换算为 rad/s。")
 
 low = max((float(o["data"].E_V.min()) for o in outputs.values()), default=None)

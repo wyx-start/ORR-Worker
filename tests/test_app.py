@@ -8,12 +8,22 @@ import pandas as pd
 from streamlit.testing.v1 import AppTest
 from orr_core import default_config, pack_project, parse_chi, set_manual_rpm, unpack_project
 from plot_smoothing import SMOOTH_A, SMOOTH_MA
+from background_conditions import resolved_configs
+from unconfigured_conditions import clear_potential_conditions
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def widget(elements, label):
     return next(e for e in elements if e.label == label)
+
+
+def load_unconfigured_examples(at):
+    """Exercise missing/historical conditions explicitly; normal defaults have separate UI coverage."""
+    widget(at.button, "载入四份示例").click().run()
+    for cfg in at.session_state.configs.values():
+        clear_potential_conditions(cfg)
+    at.run()
 
 
 def raw_axis(at):
@@ -26,6 +36,11 @@ def condition_targets(at):
     group = at.session_state.configs[source]["group"]
     return [ident for ident, cfg in at.session_state.configs.items()
             if cfg["group"] == group and cfg.get("role") != "背景"]
+
+
+def effective_background(at, ident):
+    return resolved_configs(at.session_state.configs,
+                            {key: trace.name for key, trace in at.session_state.traces.items()})[ident]
 
 
 def bind_sample_background(at):
@@ -43,9 +58,9 @@ class AppTests(unittest.TestCase):
     def assert_clean(self, at):
         self.assertEqual(len(at.exception), 0, str([e.value for e in at.exception]))
 
-    def test_batch_apply_copies_unchanged_source_electrolyte(self):
+    def test_condition_copy_preserves_hidden_electrolyte_per_file(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-        widget(at.button, "载入四份示例").click().run()
+        load_unconfigured_examples(at)
         raw_axis(at)
         source = widget(at.selectbox, "读取设置的文件").value
         targets = condition_targets(at)
@@ -54,17 +69,19 @@ class AppTests(unittest.TestCase):
         at.session_state.revision += 1
         at.session_state.settings_draft["base_revision"] = at.session_state.revision
         at.run()
-        self.assertEqual(widget(at.text_input, "电解液、浓度与气氛").value, "O2 saturated test electrolyte")
+        self.assertNotIn("电解液、浓度与气氛", [e.label for e in at.text_input])
+        before = {i:at.session_state.configs[i]["electrolyte"] for i in targets}
         widget(at.button, "复制当前条件到所选范围").click().run()
-        widget(at.button, "应用设置").click().run()
+        if any(e.label == "应用设置" for e in at.button):
+            widget(at.button, "应用设置").click().run()
         self.assert_clean(at)
         for ident in targets:
-            self.assertEqual(at.session_state.configs[ident]["electrolyte"], "O2 saturated test electrolyte")
+            self.assertEqual(at.session_state.configs[ident]["electrolyte"], before[ident])
 
     def test_full_workflow(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
         self.assert_clean(at)
-        widget(at.button, "载入四份示例").click().run()
+        load_unconfigured_examples(at)
         self.assert_clean(at)
         self.assertEqual(len(at.session_state.traces), 4)
         bind_sample_background(at)
@@ -128,7 +145,7 @@ class AppTests(unittest.TestCase):
 
     def test_failed_kl_recalculation_clears_prior_result_and_exports(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-        widget(at.button, "载入四份示例").click().run()
+        load_unconfigured_examples(at)
         raw_axis(at)
         at.switch_page("app_pages/kl.py").run()
         widget(at.number_input, "氧浓度 C / mol·cm⁻³ *").set_value(1.2e-6)
@@ -149,14 +166,14 @@ class AppTests(unittest.TestCase):
 
     def test_missing_parameters_reported_without_crash(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-        widget(at.button, "载入四份示例").click().run()
+        load_unconfigured_examples(at)
         at.switch_page("app_pages/curves.py").run()
         self.assert_clean(at)
         self.assertTrue(any("未处理" in w.value for w in at.warning))
 
     def test_conditional_rhe_forms_keep_inactive_values(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-        widget(at.button, "载入四份示例").click().run()
+        load_unconfigured_examples(at)
         self.assertNotIn("盘几何面积 / cm² *", [e.label for e in at.number_input])
         self.assertNotIn("RRDE 收集效率 N（0–1） *", [e.label for e in at.number_input])
         widget(at.number_input, "pH *").set_value(13.).run()
@@ -183,7 +200,7 @@ class AppTests(unittest.TestCase):
 
     def test_default_geometry_and_group_scoped_edits(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-        widget(at.button, "载入四份示例").click().run()
+        load_unconfigured_examples(at)
         raw_axis(at)
         at.switch_page("app_pages/curves.py").run()
         widget(at.selectbox, "纵坐标").set_value("电流密度 / mA·cm⁻²").run()
@@ -205,7 +222,7 @@ class AppTests(unittest.TestCase):
 
     def test_single_channel_and_ir_controls_are_conditional(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-        widget(at.button, "载入四份示例").click().run()
+        load_unconfigured_examples(at)
         widget(at.segmented_control, "参数设置").set_value("扫描与背景").run()
         self.assertNotIn("环电流通道", [e.label for e in at.selectbox])
         self.assertNotIn("尚未补偿电阻 / Ω *", [e.label for e in at.number_input])
@@ -217,10 +234,11 @@ class AppTests(unittest.TestCase):
 
     def test_invalid_saved_area_can_be_repaired_without_blocking_current(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-        widget(at.button, "载入四份示例").click().run()
+        load_unconfigured_examples(at)
         raw_axis(at)
         for cfg in at.session_state.configs.values():
-            cfg.update(area_cm2=-1., area_mode="area", disk_diameter_mm=None)
+            if cfg.get("role") != "背景":
+                cfg.update(area_cm2=-1., area_mode="area", disk_diameter_mm=None)
         at.run()
         at.switch_page("app_pages/curves.py").run()
         self.assert_clean(at)
@@ -230,75 +248,59 @@ class AppTests(unittest.TestCase):
         self.assertIsNone(widget(at.number_input, "盘几何面积 / cm² *").value)
         widget(at.number_input, "盘几何面积 / cm² *").set_value(.25).run()
         widget(at.segmented_control, "应用范围").set_value("自选").run()
-        widget(at.multiselect, "应用到文件").set_value(list(at.session_state.traces)).run()
+        widget(at.multiselect, "应用到文件").set_value([
+            ident for ident, cfg in at.session_state.configs.items() if cfg.get("role") != "背景"]).run()
         widget(at.button, "复制当前条件到所选范围").click().run()
         widget(at.button, "应用设置").click().run()
         self.assert_clean(at)
         self.assertIn("polarization.png", at.session_state.exports)
 
-    def test_local_profile_reuse_requires_explicit_application(self):
-        with tempfile.TemporaryDirectory() as directory, patch("experiment_conditions.PROFILE_PATH", Path(directory)/"presets.json"):
-            at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-            widget(at.button, "载入四份示例").click().run()
-            widget(at.selectbox, "原始电位的换算方式 *").set_value("实测 RHE 总偏移").run()
-            widget(at.number_input, "实测 RHE 总偏移 / V *").set_value(.95).run()
-            widget(at.selectbox, "预设保存位置").set_value("本机").run()
-            widget(at.button, "应用并保存预设").click().run()
-            self.assert_clean(at)
-            restarted = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-            widget(restarted.button, "载入四份示例").click().run()
-            source = widget(restarted.selectbox, "读取设置的文件").value
-            self.assertEqual(restarted.session_state.configs[source]["potential_method"], "理论换算")
-            widget(restarted.button, "载入预设到草稿").click().run()
-            self.assertEqual(restarted.session_state.configs[source]["potential_method"], "理论换算")
-            widget(restarted.button, "应用设置").click().run()
-            self.assert_clean(restarted)
-            cfg = restarted.session_state.configs[source]
-            self.assertEqual(cfg["potential_method"], "实测 RHE 总偏移")
-            self.assertEqual(cfg["rhe_offset_V"], .95)
-            self.assertFalse(cfg["background_reviewed"])
-            self.assertFalse(cfg["ring_detection_confirmed"])
+    def test_removed_profile_controls_preserve_project_presets(self):
+        at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
+        load_unconfigured_examples(at)
+        at.session_state.settings["presets"] = {"saved": {"pH":7., "collection_efficiency":.4}}
+        widget(at.number_input, "pH *").set_value(13.).run()
+        widget(at.button, "应用设置").click().run()
+        self.assert_clean(at)
+        self.assertNotIn("预设保存位置", [e.label for e in at.selectbox])
+        self.assertNotIn("常用条件：保存与复用", [e.label for e in at.expander])
+        _, _, settings = unpack_project(pack_project(dict(at.session_state.traces),
+            dict(at.session_state.configs), dict(at.session_state.settings)))
+        self.assertEqual(settings["presets"], {"saved": {"pH":7., "collection_efficiency":.4}})
 
-    def test_unapplied_ph_is_applied_before_saving_profile(self):
+    def test_hidden_profile_does_not_write_local_file_or_apply_ph(self):
         with tempfile.TemporaryDirectory() as directory, patch("experiment_conditions.PROFILE_PATH", Path(directory)/"presets.json"):
+            target = Path(directory)/"presets.json"
+            target.write_text('{"keep":"saved content"}', encoding="utf-8")
+            before = target.read_bytes()
             at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-            widget(at.button, "载入四份示例").click().run()
+            load_unconfigured_examples(at)
             widget(at.number_input, "pH *").set_value(13.).run()
-            self.assertTrue(any("有未应用修改" in e.value for e in at.warning))
-            self.assertFalse((Path(directory)/"presets.json").exists())
-            widget(at.selectbox, "参比方案 *").set_value("Ag/AgCl · 饱和 KCl · 25 °C").run()
             source = widget(at.selectbox, "读取设置的文件").value
             self.assertIsNone(at.session_state.configs[source]["pH"])
-            widget(at.selectbox, "预设保存位置").set_value("本机").run()
-            widget(at.button, "应用并保存预设").click().run()
+            self.assertEqual(target.read_bytes(), before)
+            widget(at.button, "应用设置").click().run()
             self.assertEqual(at.session_state.configs[source]["pH"], 13.)
-            from experiment_conditions import load_profiles
-            profiles, error = load_profiles(Path(directory)/"presets.json")
-            self.assertIsNone(error)
-            self.assertEqual(profiles["常用条件"]["pH"], 13.)
+            self.assertEqual(target.read_bytes(), before)
             self.assert_clean(at)
-
-    def test_kl_background_ph_can_be_included_and_applied_explicitly(self):
+    def test_kl_background_conditions_follow_without_an_extra_background_target(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-        widget(at.button, "载入四份示例").click().run()
+        load_unconfigured_examples(at)
         bind_sample_background(at)
         widget(at.number_input, "pH *").set_value(13.).run()
         widget(at.selectbox, "参比方案 *").set_value("Ag/AgCl · 饱和 KCl · 25 °C").run()
         widget(at.button, "应用设置").click().run()
         background = next(k for k,c in at.session_state.configs.items() if c["role"] == "背景")
-        self.assertEqual(at.session_state.configs[background]["pH"], 13.)
+        self.assertIsNone(at.session_state.configs[background]["pH"])
+        self.assertIsNone(at.session_state.configs[background]["ref_V_SHE"])
+        effective = effective_background(at, background)
+        self.assertEqual(effective["pH"], 13.)
+        self.assertEqual(effective["ref_V_SHE"], .197)
         at.switch_page("app_pages/kl.py").run()
         self.assert_clean(at)
-        self.assertTrue(any("盘背景" in str(frame.value) and "参比" in str(frame.value) for frame in at.dataframe))
-        targets = condition_targets(at) + [background]
-        widget(at.segmented_control, "应用范围").set_value("自选").run()
-        widget(at.multiselect, "应用到文件").set_value(targets).run()
-        self.assertIn(background, targets)
-        self.assertEqual(len(targets), 3)
-        widget(at.button, "复制当前条件到所选范围").click().run()
-        widget(at.button, "应用设置").click().run()
-        self.assertEqual(at.session_state.configs[background]["pH"], 13.)
-        self.assertEqual(at.session_state.configs[background]["ref_V_SHE"], .197)
+        self.assertFalse(any("盘背景" in str(frame.value) and "请填写" in str(frame.value) for frame in at.dataframe))
+        self.assertNotIn(background, condition_targets(at))
+        self.assertEqual(len(effective["background_conditions"]["linked_samples"]), 2)
         self.assertIn("电解液参数方案 *", [e.label for e in at.selectbox])
         widget(at.selectbox, "读取设置的文件").set_value(background).run()
         self.assertEqual(widget(at.segmented_control, "应用范围").value, "当前组")
@@ -342,18 +344,21 @@ class AppTests(unittest.TestCase):
 
     def test_background_ph_follows_applied_values_and_detects_shared_conflict(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-        widget(at.button, "载入四份示例").click().run()
+        load_unconfigured_examples(at)
         bg = next(k for k,c in at.session_state.configs.items() if c["role"] == "背景")
         self.assertIsNone(at.session_state.configs[bg]["pH"])
         bind_sample_background(at)
-        self.assertEqual(at.session_state.configs[bg]["background_ph_status"], "waiting")
+        self.assertEqual(effective_background(at, bg)["background_conditions"]["status"], "waiting")
         widget(at.number_input, "pH *").set_value(13.).run()
         self.assertIsNone(at.session_state.configs[bg]["pH"])
         widget(at.selectbox, "参比方案 *").set_value("Ag/AgCl · 饱和 KCl · 25 °C").run()
         widget(at.button, "应用设置").click().run()
-        self.assertEqual(at.session_state.configs[bg]["pH"], 13.)
+        self.assertIsNone(at.session_state.configs[bg]["pH"])
         self.assertIsNone(at.session_state.configs[bg]["ref_V_SHE"])
-        self.assertEqual(len(at.session_state.configs[bg]["background_ph_sources"]), 2)
+        effective = effective_background(at, bg)
+        self.assertEqual(effective["pH"], 13.)
+        self.assertEqual(effective["ref_V_SHE"], .197)
+        self.assertEqual(len(effective["background_conditions"]["linked_samples"]), 2)
         source = widget(at.selectbox, "读取设置的文件").value
         widget(at.segmented_control, "应用范围").set_value("仅此文件").run()
         widget(at.number_input, "pH *").set_value(12.).run()
@@ -361,15 +366,19 @@ class AppTests(unittest.TestCase):
         at.session_state.exports = {"old.csv":{"bytes":b"old", "mime":"text/csv"}}
         widget(at.button, "应用设置").click().run()
         self.assertIsNone(at.session_state.configs[bg]["pH"])
-        self.assertEqual(at.session_state.configs[bg]["background_ph_status"], "conflict")
+        self.assertEqual(effective_background(at, bg)["background_conditions"]["status"], "conflict")
         self.assertEqual(at.session_state.results, {})
         self.assertEqual(at.session_state.exports, {})
-        self.assertTrue(any("共享背景 pH 冲突" in str(frame.value) for frame in at.dataframe))
+        self.assertTrue(any("pH" in str(frame.value) and "冲突" in str(frame.value) for frame in at.dataframe))
         self.assert_clean(at)
 
     def test_background_manual_mode_and_following_switch(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-        widget(at.button, "载入四份示例").click().run()
+        load_unconfigured_examples(at)
+        # This regression exercises the imported legacy pH panel. The new full
+        # condition panel is delivered by Qoder and has its own acceptance tests.
+        bg = next(k for k,c in at.session_state.configs.items() if c["role"] == "背景")
+        at.session_state.configs[bg]["background_conditions_mode"] = "legacy_ph"
         bind_sample_background(at)
         widget(at.number_input, "pH *").set_value(13.).run()
         widget(at.button, "应用设置").click().run()
@@ -389,12 +398,13 @@ class AppTests(unittest.TestCase):
         widget(at.segmented_control, "参数设置").set_value("扫描与背景").run()
         widget(at.selectbox, "背景 pH 模式").set_value("跟随关联样品").run()
         widget(at.button, "应用设置").click().run()
-        self.assertEqual(at.session_state.configs[bg]["pH"], 14.)
+        self.assertEqual(at.session_state.configs[bg]["pH"], 12.)
+        self.assertEqual(effective_background(at, bg)["pH"], 14.)
         self.assert_clean(at)
 
     def test_scan_background_commit_activates_link_and_file_removal_cleans_it(self):
         at = AppTest.from_file(str(ROOT/"streamlit_app.py"), default_timeout=30).run()
-        widget(at.button, "载入四份示例").click().run()
+        load_unconfigured_examples(at)
         widget(at.number_input, "pH *").set_value(13.).run()
         widget(at.button, "应用设置").click().run()
         sample = widget(at.selectbox, "读取设置的文件").value
@@ -405,11 +415,12 @@ class AppTests(unittest.TestCase):
         widget(at.selectbox, "盘背景文件").set_value(bg).run()
         self.assertIsNone(at.session_state.configs[bg]["pH"])
         widget(at.button, "应用设置").click().run()
-        self.assertEqual(at.session_state.configs[bg]["pH"], 13.)
+        self.assertIsNone(at.session_state.configs[bg]["pH"])
+        self.assertEqual(effective_background(at, bg)["pH"], 13.)
         widget(at.multiselect, "选择移除（原始文件不会删除）").set_value([sample]).run()
         widget(at.button, "从本次分析移除").click().run()
         self.assertIsNone(at.session_state.configs[bg]["pH"])
-        self.assertEqual(at.session_state.configs[bg]["background_ph_status"], "unbound")
+        self.assertEqual(effective_background(at, bg)["background_conditions"]["status"], "unbound")
         self.assert_clean(at)
 
 

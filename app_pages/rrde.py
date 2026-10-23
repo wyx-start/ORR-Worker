@@ -7,11 +7,11 @@ import streamlit as st
 from condition_ui import common_parameter_form
 from download_ui import result_downloads
 from origin_export import csv_bytes, rrde_plot_table
-from orr_core import DataError, SOURCES, json_bytes, parameter_record, rrde_calculate
+from orr_core import DataError, SOURCES, json_bytes, parameter_record, rrde_calculate, require_number
 from ui_shared import (apply_pending_settings, apply_settings_button, axis_label,
                        figure_style, file_formatter, get_draft_configs,
                        get_draft_settings, has_draft, label, offer_figure,
-                       pending_candidate, process_selected, require_files,
+                       pending_candidate, process_selected, require_files, get_draft_view,
                        show_errors, show_notes, store_table)
 
 
@@ -41,26 +41,19 @@ selected = st.multiselect("RRDE 文件", options, default=defaults,
 if selected:
     common_parameter_form(purpose="rrde", ids=selected)
 apply_settings_button(key=f"rrde_apply_settings_{workspace}")
-configs, settings = get_draft_configs(), get_draft_settings()
-outputs, errors = process_selected(selected, configs=configs, settings=settings)
+preview_view = get_draft_view()
+configs, settings = preview_view["configs"], preview_view["settings"]
+if preview_view["view_basis"] == "applied_fallback":
+    outputs, errors = {}, []
+    st.warning("草稿待修正；下方条件基于已应用设置，暂不生成分析预览。")
+else:
+    outputs, errors = process_selected(selected, configs=preview_view["records"], settings=settings)
 show_errors(errors)
 if not selected:
     clear_rrde()
     st.info("至少选择一个 RRDE 文件。")
     st.stop()
-with st.expander("核对参与计算的盘环条件"):
-    st.dataframe([{
-        "文件": st.session_state.traces[ident].name, "N": configs[ident].get("collection_efficiency"),
-        "盘通道": configs[ident].get("disk_channel"), "环通道": configs[ident].get("ring_channel"),
-        "电位坐标": settings.get("axis", "RHE"),
-        "检测条件已确认": configs[ident].get("ring_detection_confirmed", False),
-        "处理状态": "可预览" if ident in outputs else "需要修正",
-    } for ident in selected], hide_index=True)
-    st.caption("草稿预览，尚未应用。" if has_draft() else "以上是已应用参数。")
-with st.expander("高级：低电流阈值"):
-    floor = st.number_input("最小盘还原电流幅值 / A", min_value=1e-15,
-        value=float(opts.get("floor_A", 1e-9)), format="%.3e", key=f"rrde_floor_{workspace}", persist_state="session",
-        help="低于阈值的点不计算比值；不对异常符号取绝对值。")
+floor = settings.get("rrde", {}).get("floor_A", 1e-9)
 current_inputs = dict(floor_A=floor, selected=list(selected))
 signature = json_bytes(current_inputs)
 saved = st.session_state.results.get("rrde")
@@ -71,6 +64,7 @@ if saved and (saved.get("input_signature") != signature or saved.get("revision")
 
 def compute_current():
     clear_rrde()
+    require_number(floor, "最小盘电流幅值（A）", positive=True)
     candidate_configs, candidate_settings = pending_candidate()
     processed, failures = process_selected(selected, configs=candidate_configs, settings=candidate_settings)
     results, chosen = {}, {}
@@ -89,6 +83,8 @@ def compute_current():
         export.insert(0, "file_id", ident)
         export.insert(1, "filename", chosen[ident]["name"])
         export.insert(2, "potential_axis", chosen[ident]["axis"])
+        export.insert(3, "rpm", chosen[ident]["config"].get("rpm"))
+        export.insert(4, "rpm_source", chosen[ident]["config"].get("rpm_source"))
         frames.append(export)
     merged = pd.concat(frames, ignore_index=True)
     used = deepcopy(candidate_settings.get("rrde", {}))

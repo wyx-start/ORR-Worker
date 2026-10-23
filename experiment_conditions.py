@@ -10,6 +10,7 @@ import tempfile
 
 from orr_core import DataError, require_number, rhe_shift
 from background_ph import ph_link_error
+from background_conditions import INHERITED_FIELDS, condition_error, controlled_fields
 
 PROFILE_PATH = Path(__file__).resolve().parent / "user_settings" / "experiment_presets.json"
 CONDITION_FIELDS = (
@@ -29,6 +30,8 @@ def area_from_diameter(diameter_mm):
 
 def snapshot_conditions(cfg):
     """Only reusable conditions; never copy file identity or confirmations."""
+    if cfg.get("role") == "背景" and controlled_fields(cfg) and "background_conditions" not in cfg:
+        raise DataError("背景正在沿用关联样品条件；请使用已解析的有效条件保存或复制预设，不能读取独立缓存代替。")
     result = {k:copy.deepcopy(cfg[k]) for k in CONDITION_FIELDS if k in cfg}
     result["parameter_sources"] = {k:copy.deepcopy(v) for k,v in cfg.get("parameter_sources", {}).items()
                                    if k in CONDITION_FIELDS}
@@ -55,7 +58,7 @@ def validate_conditions(values):
     return values
 
 
-def apply_conditions(cfg, values, source="人工输入", overwrite=True, background_ph_edit=True):
+def _apply_conditions(cfg, values, source="人工输入", overwrite=True, background_ph_edit=True):
     values = snapshot_conditions(values)
     validate_conditions(values)
     sources = cfg.setdefault("parameter_sources", {})
@@ -97,15 +100,66 @@ def apply_conditions(cfg, values, source="人工输入", overwrite=True, backgro
     return changed
 
 
+def apply_conditions(cfg, values, source="人工输入", overwrite=True, background_ph_edit=True):
+    """Update an independent record atomically; never accept a resolved view.
+
+    Followed equal-value intents must first be removed using the caller's one
+    resolved view. This function cannot infer the associated samples from cfg.
+    Explicit legacy pH edits retain their old manual-switch semantics.
+    """
+    if "background_conditions" in cfg:
+        raise DataError("有效条件视图不能直接修改；请使用 get_draft_view() 的 records 构建设置补丁。")
+    supplied = snapshot_conditions(values)
+    mode = cfg.get("background_conditions_mode", "legacy_ph")
+    if cfg.get("role") == "背景" and mode == "follow":
+        requested = set(INHERITED_FIELDS).intersection(supplied)
+        if requested:
+            raise DataError("背景的 " + "、".join(sorted(requested)) +
+                            " 正在跟随关联样品；请先明确切到独立设置，或从有效视图消除真正的同值操作。")
+    proposed = copy.deepcopy(cfg)
+    keep_ph = (cfg.get("role") == "背景" and mode == "legacy_ph"
+               and not background_ph_edit and "pH" in controlled_fields(cfg))
+    changed = _apply_conditions(proposed, supplied, source, overwrite, background_ph_edit)
+    if keep_ph:
+        # Bulk sample changes only update the source; do not populate a legacy
+        # background's independent record with its new effective pH.
+        if "pH" in cfg:
+            proposed["pH"] = copy.deepcopy(cfg["pH"])
+        else:
+            proposed.pop("pH", None)
+        sources = proposed.setdefault("parameter_sources", {})
+        if "pH" in cfg.get("parameter_sources", {}):
+            sources["pH"] = copy.deepcopy(cfg["parameter_sources"]["pH"])
+        else:
+            sources.pop("pH", None)
+    changed = proposed != cfg
+    cfg.clear()
+    cfg.update(proposed)
+    return changed
+
+
 def missing_conditions(cfg, purpose="curves", axis="RHE", density=False):
     issues = []
-    if ph_link_error(cfg):
-        issues.append(ph_link_error(cfg))
-    if axis == "RHE" and not ph_link_error(cfg):
+    link_error = condition_error(cfg) or ph_link_error(cfg)
+    if link_error:
+        issues.append(link_error)
+    if axis == "RHE" and not link_error:
+        method = cfg.get("potential_method", "理论换算")
+        required = {"理论换算": ("pH", "temperature_C", "ref_V_SHE"),
+                    "实测 RHE 总偏移": ("rhe_offset_V",), "已是 RHE": ()}.get(method, ("potential_method",))
+        labels = {"pH": "pH", "temperature_C": "温度", "ref_V_SHE": "参比电位",
+                  "rhe_offset_V": "实测 RHE 总偏移", "potential_method": "电位换算方式"}
+        states = cfg.get("background_conditions", {}).get("field_states", {})
+        if cfg.get("role") == "背景":
+            for field in required:
+                if cfg.get(field) is None:
+                    waiting = not states.get(field, {}).get("editable", True)
+                    issues.append(("等待关联样品填写 " if waiting else "背景自身缺少 ") + labels[field])
         try:
             rhe_shift(cfg)
         except (DataError, ValueError, TypeError) as exc:
-            issues.append(str(exc))
+            if not issues:
+                issues.append(str(exc))
     if purpose == "kl" or density:
         try:
             require_number(cfg.get("area_cm2"), "盘几何面积（cm²）", positive=True)

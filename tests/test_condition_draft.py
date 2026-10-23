@@ -9,6 +9,7 @@ APP = '''
 import numpy as np
 import streamlit as st
 from orr_core import Trace, default_config
+from unconfigured_conditions import unconfigured_config
 from ui_shared import initialize, apply_settings_button, get_draft_configs
 from condition_ui import common_parameter_form
 initialize()
@@ -16,7 +17,7 @@ if not st.session_state.traces:
     for name, group in [("sample_a", "group_one"), ("sample_b", "group_one"), ("sample_c", "group_two")]:
         trace = Trace(name+".txt", name.encode(), {}, ["Potential/V", "Current/A"],
                       np.array([[1., -.0001], [.5, -.0002], [0., -.0003]]), "utf-8", [])
-        cfg = default_config(trace)
+        cfg = unconfigured_config(trace)
         cfg.update(group=group, electrolyte="source electrolyte" if name == "sample_a" else "other electrolyte")
         st.session_state.traces[trace.id] = trace
         st.session_state.configs[trace.id] = cfg
@@ -54,7 +55,7 @@ class ConditionDraftTests(unittest.TestCase):
         self.assertIsNone(at.session_state.configs[second]["pH"])
         self.assertEqual(at.session_state.test_candidate[first]["pH"], 13.)
         self.assertEqual(at.session_state.test_candidate[second]["pH"], 13.)
-        self.assertEqual(at.session_state.test_candidate[second]["electrolyte"], "source electrolyte")
+        self.assertEqual(at.session_state.test_candidate[second]["electrolyte"], "other electrolyte")
         self.assertIsNone(at.session_state.test_candidate[third]["pH"])
         widget(at.button, "应用设置").click().run()
         self.assert_clean(at)
@@ -78,14 +79,19 @@ class ConditionDraftTests(unittest.TestCase):
         self.assert_clean(at)
         # A different source must report a conflicting edit, not override it.
         self.assertIn("矛盾", at.session_state.draft_error)
-        self.assertEqual(at.session_state.test_candidate[first]["pH"], 13.)
+        self.assertIsNone(at.session_state.test_candidate[first]["pH"])
+        self.assertEqual(at.session_state.settings_draft["configs"][f"conditions:{first}"][first]["pH"], 13.)
+        self.assertEqual(at.session_state.rejected_config_edits[f"conditions:{third}"][first]["pH"], 11.)
 
     def test_explicit_copy_keeps_unchanged_source_and_discard_clears_out_of_source_view(self):
         at = self.app()
         first, second, third = self.ids(at)
+        at.session_state.configs[first]["pH"] = 12.
+        at.run()
         widget(at.button, "复制当前条件到所选范围").click().run()
         self.assert_clean(at)
-        self.assertEqual(at.session_state.test_candidate[second]["electrolyte"], "source electrolyte")
+        self.assertEqual(at.session_state.test_candidate[second]["pH"], 12.)
+        self.assertEqual(at.session_state.test_candidate[second]["electrolyte"], "other electrolyte")
         self.assertEqual(at.session_state.configs[second]["electrolyte"], "other electrolyte")
         widget(at.button, "放弃未应用修改").click().run()
         self.assertEqual(at.session_state.test_candidate[second]["electrolyte"], "other electrolyte")
@@ -98,13 +104,13 @@ class ConditionDraftTests(unittest.TestCase):
         widget(at.button, "放弃未应用修改").click().run()
         self.assert_clean(at)
         self.assertIsNone(widget(at.number_input, "pH *").value)
-        self.assertIsNone(at.session_state.test_candidate[first]["pH"])
+        self.assertEqual(at.session_state.test_candidate[first]["pH"], 12.)
 
-    def test_profile_then_manual_edit_is_one_draft_and_uses_one_save_entry(self):
+    def test_manual_edits_are_one_draft_and_leave_existing_preset_unchanged(self):
         at = self.app()
         first, second, _ = self.ids(at)
-        widget(at.selectbox, "选择常用条件").set_value("项目 · test preset").run()
-        widget(at.button, "载入预设到草稿").click().run()
+        self.assertNotIn("选择常用条件", [e.label for e in at.selectbox])
+        widget(at.number_input, "pH *").set_value(12.).run()
         self.assert_clean(at)
         self.assertEqual(widget(at.number_input, "pH *").value, 12.)
         self.assertIsNone(at.session_state.configs[first]["pH"])
@@ -112,21 +118,20 @@ class ConditionDraftTests(unittest.TestCase):
         self.assert_clean(at)
         self.assertEqual(at.session_state.test_candidate[first]["pH"], 14.)
         self.assertEqual(at.session_state.test_candidate[second]["pH"], 14.)
-        widget(at.text_input, "配置名称（选填）").set_value("edited preset").run()
-        widget(at.button, "应用并保存预设").click().run()
+        widget(at.button, "应用设置").click().run()
         self.assert_clean(at)
         self.assertEqual(at.session_state.configs[first]["pH"], 14.)
-        self.assertEqual(at.session_state.settings["presets"]["edited preset"]["pH"], 14.)
+        self.assertEqual(at.session_state.settings["presets"]["test preset"]["pH"], 12.)
         self.assertNotIn("保存到当前项目", [e.label for e in at.button])
         self.assertNotIn("设为本机常用条件", [e.label for e in at.button])
 
-    def test_profile_template_remains_visible_when_source_is_not_a_target(self):
+    def test_manual_template_remains_visible_when_source_is_not_a_target(self):
         at = self.app()
         first, second, _ = self.ids(at)
         widget(at.segmented_control, "应用范围").set_value("自选").run()
         widget(at.multiselect, "应用到文件").set_value([second]).run()
-        widget(at.selectbox, "选择常用条件").set_value("项目 · test preset").run()
-        widget(at.button, "载入预设到草稿").click().run()
+        self.assertNotIn("选择常用条件", [e.label for e in at.selectbox])
+        widget(at.number_input, "pH *").set_value(12.).run()
         self.assert_clean(at)
         self.assertIsNone(at.session_state.test_candidate[first]["pH"])
         self.assertEqual(at.session_state.test_candidate[second]["pH"], 12.)

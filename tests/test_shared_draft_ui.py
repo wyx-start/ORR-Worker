@@ -6,7 +6,6 @@ from unittest.mock import patch
 from streamlit.testing.v1 import AppTest
 
 import ui_shared
-from background_ph import synchronize_ph_links
 from orr_core import DataError
 from settings_draft import new_draft
 from test_settings_draft import fixtures
@@ -101,18 +100,35 @@ class SharedDraftAdapterTests(unittest.TestCase):
         self.assertEqual({key: value for key, value in self.state.items() if key != "traces"}, before)
 
     def test_preview_resolves_background_ph_without_changing_applied_config(self):
-        self.state.configs[self.a].update(pH=13., background_disk=self.bg, background_ring=self.bg)
-        synchronize_ph_links(self.state.configs)
-        self.assertEqual(self.state.configs[self.bg]["pH"], 13.)
+        self.state.configs[self.a].update(pH=13., ref_V_SHE=.197,
+                                         background_disk=self.bg, background_ring=self.bg)
+        self.state.configs[self.bg]["pH"] = 11.
+        self.state.configs[self.bg]["parameter_sources"]["pH"] = "synthetic independent record"
+        before = copy.deepcopy(self.state.configs)
+        applied = ui_shared.get_draft_view()
+        self.assertEqual(applied["view_basis"], "applied")
+        self.assertEqual(applied["records"][self.bg]["pH"], 11.)
+        self.assertEqual(applied["configs"][self.bg]["pH"], 13.)
         ui_shared.stage_config_updates("conditions", {self.a: {"pH": 12.}})
-        preview = ui_shared.get_draft_configs()
-        self.assertEqual(preview[self.bg]["pH"], 12.)
-        self.assertEqual(self.state.configs[self.bg]["pH"], 13.)
-        self.assertIn("12", preview[self.bg]["background_ph_detail"])
+        preview = ui_shared.get_draft_view()
+        self.assertEqual(preview["view_basis"], "candidate")
+        self.assertEqual(preview["records"][self.bg]["pH"], 11.)
+        self.assertNotIn("background_conditions", preview["records"][self.bg])
+        self.assertEqual(preview["configs"][self.bg]["pH"], 12.)
+        state = preview["configs"][self.bg]["background_conditions"]["field_states"]["pH"]
+        self.assertEqual(state["status"], "following")
+        self.assertEqual(state["sources"], [{"id":self.a, "filename":self.a, "value":12.}])
+        self.assertEqual(self.state.configs, before)
 
     def test_invalid_preview_keeps_applied_values_and_draft_available_for_repair(self):
         ui_shared.stage_config_updates("scan", {self.a: {"disk_channel": 99}})
-        self.assertEqual(ui_shared.get_draft_configs()[self.a]["disk_channel"], 99)
+        view = ui_shared.get_draft_view()
+        self.assertEqual(view["view_basis"], "applied_fallback")
+        self.assertEqual(view["records"][self.a]["disk_channel"], 0)
+        self.assertEqual(ui_shared.get_draft_configs()[self.a]["disk_channel"], 0)
+        self.assertEqual(view["staged_edits"]["scan"][self.a]["disk_channel"], 99)
+        self.assertEqual(ui_shared.get_edit_configs("scan")[self.a]["disk_channel"], 99)
+        self.assertTrue(view["errors"])
         with self.assertRaises(DataError):
             ui_shared.apply_pending_settings()
         self.assertEqual(self.state.configs[self.a]["disk_channel"], 0)

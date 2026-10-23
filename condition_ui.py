@@ -5,18 +5,30 @@ import copy
 import hashlib
 import json
 import math
+import re
 import streamlit as st
 import pandas as pd
 
-from experiment_conditions import (apply_conditions, area_from_diameter, load_profiles,
-    linked_backgrounds, missing_conditions, save_profile, snapshot_conditions,
-    validate_conditions)
+from background_conditions import INHERITED_FIELDS, NUMERIC, controlled_fields
+from experiment_conditions import (apply_conditions, area_from_diameter,
+    linked_backgrounds, missing_conditions)
 from orr_core import DataError
+from settings_editor import effective_independent_values, stage_background_mode
 from ui_shared import (REFERENCE_PRESETS, apply_pending_settings, file_formatter,
-                       get_draft_configs, get_draft_settings, has_draft,
-                       stage_config_updates)
+                       get_draft_view, get_edit_configs, has_draft,
+                       reject_config_updates, stage_config_updates)
 
 METHODS = ["理论换算", "实测 RHE 总偏移", "已是 RHE"]
+
+# Fields the editor can display; external changes to any of them re-seed widgets.
+WATCH_FIELDS = ("potential_method", "pH", "temperature_C", "reference", "filling",
+                "ref_V_SHE", "reference_source", "reference_preset_C", "rhe_offset_V",
+                "electrolyte", "area_cm2", "disk_diameter_mm", "area_mode",
+                "collection_efficiency")
+
+MODE_LABELS = {"follow": "整组跟随关联样品", "independent": "独立设置", "legacy_ph": "旧版 pH 兼容"}
+STATUS_LABELS = {"following": "跟随中", "independent": "独立", "waiting": "等待关联样品",
+                 "conflict": "条件冲突", "invalid": "记录无效", "unbound": "尚未关联"}
 
 
 def _number_value(cfg, field, lower=None, upper=None, default=None):
@@ -52,6 +64,24 @@ def _source_summary(cfg, purpose, density, axis="RHE"):
     return text
 
 
+def _background_condition_summary(name, bgcfg, axis):
+    """One method-aware line from the resolved background view."""
+    info = bgcfg.get("background_conditions") or {}
+    status, mode = info.get("status"), info.get("mode")
+    detail = info.get("detail") or ""
+    if status == "following":
+        head = "旧版 pH 跟随" if mode == "legacy_ph" else "整组跟随样品"
+        return f"{name}：{head} · {_source_summary(bgcfg, 'curves', False, axis)}"
+    if status == "independent":
+        head = "旧版 pH 独立" if mode == "legacy_ph" else "独立记录"
+        return f"{name}：{head} · {_source_summary(bgcfg, 'curves', False, axis)}"
+    if status == "waiting":
+        return f"{name}：等待关联样品（{detail}）"
+    if status == "unbound":
+        return f"{name}：尚未关联样品"
+    return f"{name}：{detail or '背景条件冲突或无效'}"
+
+
 def _area_controls(cfg, prefix):
     options = ["按盘直径计算", "直接输入面积"]
     mode = st.selectbox("盘面积输入方式", options,
@@ -72,17 +102,60 @@ def _area_controls(cfg, prefix):
     return values
 
 
-def condition_updates(configs, targets, values, *, source="人工输入", overwrite=True,
+def _missing(value):
+    return value is None or isinstance(value, str) and value.strip() in ("", "未设置", "未记录")
+
+
+def _same_condition_value(field, left, right):
+    if _missing(left) and _missing(right):
+        return True
+    if _missing(left) or _missing(right):
+        return False
+    if field in NUMERIC:
+        try:
+            return math.isclose(float(left), float(right), rel_tol=0., abs_tol=1e-9)
+        except (TypeError, ValueError):
+            return False
+    clean = lambda text: re.sub(r"\s+", " ", str(text).strip()).casefold()
+    return clean(left) == clean(right)
+
+
+def condition_updates(view, targets, values, *, names=None, source="人工输入", overwrite=True,
                       background_ph_edit=False):
-    """Build isolated candidate patches without committing or modifying inputs."""
+    """Build one atomic patch set from the shared view; nothing is committed.
+
+    For records still following linked samples, intents that merely restate the
+    current effective value are removed together with their parameter_sources
+    leaf.  The elimination only runs on a valid applied/candidate view; under an
+    applied fallback every field is checked by the business layer instead.
+    """
+    records, configs = view["records"], view["configs"]
+    eliminate = view["view_basis"] in ("applied", "candidate")
     updates = {}
     for ident in targets:
-        before = configs[ident]
-        after = copy.deepcopy(before)
-        apply_conditions(after, values, source=source, overwrite=overwrite,
-                         background_ph_edit=background_ph_edit)
-        patch = {field:copy.deepcopy(value) for field,value in after.items()
-                 if field not in before or before[field] != value}
+        record = records[ident]
+        intended = copy.deepcopy(values)
+        blocked = controlled_fields(record) if record.get("role") == "背景" else set()
+        if eliminate and blocked:
+            effective = configs[ident]
+            sources = intended.get("parameter_sources")
+            for field in list(intended):
+                if field != "parameter_sources" and \
+                        _same_condition_value(field, intended[field], effective.get(field)):
+                    intended.pop(field)
+                    if isinstance(sources, dict):
+                        sources.pop(field, None)
+            if isinstance(sources, dict) and not sources:
+                intended.pop("parameter_sources", None)
+        after = copy.deepcopy(record)
+        try:
+            apply_conditions(after, intended, source=source, overwrite=overwrite,
+                             background_ph_edit=background_ph_edit)
+        except (DataError, ValueError, TypeError) as exc:
+            label = (names or {}).get(ident) or record.get("name") or ident
+            raise DataError(f"{label}：{exc}") from exc
+        patch = {field: copy.deepcopy(value) for field, value in after.items()
+                 if field not in record or record[field] != value}
         if patch:
             updates[ident] = patch
     return updates
@@ -93,223 +166,260 @@ def _fingerprint(value):
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
-def _profiles(cfg, source_id, targets, prefix, editor_context):
-    with st.expander("常用条件：保存与复用"):
-        local, error = load_profiles()
-        if error:
-            st.warning(error)
-        project = st.session_state.settings.setdefault("presets", {})
-        options = {f"本机 · {name}":(values, f"本机预设：{name}") for name,values in local.items()}
-        options.update({f"项目 · {name}":(values, f"项目预设：{name}") for name,values in project.items()})
-        if options:
-            picked = st.selectbox("选择常用条件", list(options), key=prefix+"profile")
-            overwrite = st.checkbox("覆盖所选文件已有的非空条件", value=False, key=prefix+"overwrite")
-            st.caption(f"应用到上方明确选择的 {len(targets)} 个文件；默认只补空白和软件初始默认。不会继承新文件的核对状态。")
-            with st.expander("查看所选预设的内容"):
-                st.json(options[picked][0])
-            if st.button("载入预设到草稿", disabled=not targets, key=prefix+"apply_profile"):
-                values, source = options[picked]
-                try:
-                    seed = copy.deepcopy(cfg)
-                    apply_conditions(seed, values, source=source, overwrite=overwrite,
-                                     background_ph_edit=cfg.get("role") == "背景")
-                    updates = condition_updates(get_draft_configs(), targets, values,
-                        source=source, overwrite=overwrite,
-                        background_ph_edit=cfg.get("role") == "背景")
-                    if not stage_config_updates(f"conditions:{source_id}", updates):
-                        raise DataError(st.session_state.get("draft_error", "预设未能加入草稿。"))
-                    # The candidate is now authoritative. A fresh input view
-                    # prevents retained widget values from undoing this load.
-                    # Keep the loaded template visible even if the reading
-                    # source is deliberately excluded from the target set.
-                    st.session_state.setdefault("condition_editor_views", {})[editor_context] = {
-                        "epoch":0, "seed":seed}
-                    st.session_state["condition_editor_epoch"] = st.session_state.get("condition_editor_epoch", 0)+1
-                    st.session_state.conditions_notice = "预设已载入草稿；点击统一“应用设置”后生效。"
-                    st.rerun()
-                except (DataError, TypeError, ValueError) as exc:
-                    st.error(str(exc))
-        else:
-            st.caption("尚无常用条件。完成配置并应用后，可保存到当前项目或本机供下一批选用。")
-        name = st.text_input("配置名称（选填）", value="常用条件", key=prefix+"profile_name")
-        location = st.selectbox("预设保存位置", ["当前项目", "本机"],
-            key=prefix+"location", persist_state="session")
-        pending = has_draft()
-        st.caption("保存读取来源文件的整套可复用条件；有草稿时先统一校验并应用。同名保存会更新该预设，不保存身份、转速、背景或核对状态。")
-        if st.button("应用并保存预设" if pending else "保存预设", key=prefix+"save"):
-            try:
-                if pending and not apply_pending_settings():
-                    raise DataError("设置未能应用，预设尚未保存。请修正草稿后重试。")
-                applied_cfg = st.session_state.configs[source_id]
-                values = validate_conditions(snapshot_conditions(applied_cfg))
-                if location == "当前项目":
-                    st.session_state.settings.setdefault("presets", {})[name.strip() or "常用条件"] = values
-                    st.session_state.exports.pop("parameters.json", None)
-                    st.session_state.conditions_notice = "已保存到当前项目；下载项目后可继续使用。"
-                else:
-                    save_profile(name, applied_cfg)
-                    st.session_state.conditions_notice = "已保存到本机；重启后可选用，不会自动覆盖下一批文件。"
-                st.rerun()
-            except (DataError, TypeError, ValueError) as exc:
-                st.error(str(exc))
+def _display_config(edit_cfg, resolved_cfg):
+    """Editor seed: unresolved edit record, with locked fields showing effective values."""
+    info = resolved_cfg.get("background_conditions") or {}
+    states = info.get("field_states") or {}
+    if not states:
+        return edit_cfg, states
+    display = dict(edit_cfg)
+    sources = dict(display.get("parameter_sources") or {})
+    effective_sources = resolved_cfg.get("parameter_sources") or {}
+    for field, state in states.items():
+        if not state.get("editable", True):
+            display[field] = resolved_cfg.get(field)
+            if field in effective_sources:
+                sources[field] = effective_sources[field]
+    if sources:
+        display["parameter_sources"] = sources
+    return display, states
 
 
 def common_parameter_form(purpose="curves", ids=None, density=False, expanded=False, channels="all", subtract_background=True):
-    """Read candidates into a scoped view; explicit changes enter shared draft."""
+    """Read the shared draft view; explicit changes enter the shared draft."""
+    view = get_draft_view()
+    records, configs = view["records"], view["configs"]
+    names = {ident: trace.name for ident, trace in st.session_state.traces.items()}
     allowed_ids = list(st.session_state.traces)
-    candidates = get_draft_configs()
-    ids = [i for i in ids if i in candidates] if ids is not None else [i for i in allowed_ids if candidates[i].get("role") != "背景"]
+    ids = [i for i in ids if i in records] if ids is not None else [i for i in allowed_ids if records[i].get("role") != "背景"]
     if not ids:
         ids = allowed_ids
     if not ids:
         return
     applied_axis = st.session_state.settings.get("axis", "RHE")
-    axis = get_draft_settings().get("axis", "RHE")
+    axis = view["settings"].get("axis", "RHE")
     def relevant_backgrounds(config):
         if not subtract_background:
             return []
         if channels in ("ring", "disk"):
             bgid = config.get("background_"+channels)
-            return [bgid] if bgid in candidates else []
-        return linked_backgrounds(config, candidates)
+            return [bgid] if bgid in records else []
+        return linked_backgrounds(config, records)
     st.subheader("当前实验条件")
     notice = st.session_state.pop("conditions_notice", None)
     if notice:
         st.success(notice)
-    st.caption("标记 `*` 的项目为当前操作必填；默认值或预设已填入的项目可直接使用。自动识别及默认值仍请按实际实验核对。")
+    st.caption("标记 `*` 的项目为当前操作必填；已填入的默认值可直接使用。自动识别及默认值仍请按实际实验核对。")
+    if view["view_basis"] == "applied_fallback":
+        st.caption("草稿待修正；下方条件基于已应用设置。")
     rows, has_potential_issue = [], False
     for ident in ids:
-        cfg = candidates[ident]
-        applied_cfg = st.session_state.configs[ident]
+        cfg = configs[ident]
+        record = records[ident]
+        applied_record = st.session_state.configs[ident]
         issues = missing_conditions(cfg, purpose, axis, density)
         has_potential_issue |= bool(missing_conditions(cfg, "curves", axis))
         background_details = []
-        for bgid in relevant_backgrounds(cfg):
-            bgcfg = candidates[bgid]
-            background_details.append(f"{st.session_state.traces[bgid].name}：{bgcfg.get('background_ph_detail', 'pH 独立设置')}")
+        for bgid in relevant_backgrounds(record):
+            bgcfg = configs[bgid]
+            background_details.append(_background_condition_summary(st.session_state.traces[bgid].name, bgcfg, axis))
             bg_issues = missing_conditions(bgcfg, "curves", axis)
             if bg_issues:
                 has_potential_issue = True
                 issues.append(f"背景“{st.session_state.traces[bgid].name}”：" + "；".join(bg_issues))
         rows.append({"文件":st.session_state.traces[ident].name,
-                     "已应用条件":_source_summary(applied_cfg, purpose, density, applied_axis),
-                     "待应用修改":_source_summary(cfg, purpose, density, axis) if cfg != applied_cfg or axis != applied_axis else "无",
-                     "背景 pH":"；".join(background_details) or "未关联背景",
+                     "已应用条件":_source_summary(applied_record, purpose, density, applied_axis),
+                     "待应用修改":_source_summary(cfg, purpose, density, axis) if record != applied_record or axis != applied_axis else "无",
+                     "背景条件":"；".join(background_details) or "未关联背景",
                      "当前待完成":"；".join(issues) if issues else "本页基础参数齐备"})
     st.dataframe(pd.DataFrame(rows), hide_index=True)
     if has_potential_issue and axis == "RHE":
         st.info("RHE 换算条件未齐。可展开下方修改条件，或在侧栏将电位坐标改为“原始”后应用设置。")
     with st.expander("修改实验条件", expanded=expanded, key=f"condition_editor_{purpose}", on_change="rerun"):
-        source_options = list(dict.fromkeys(ids + [i for i in allowed_ids if candidates[i].get("role") == "背景"]))
+        source_options = list(dict.fromkeys(ids + [i for i in allowed_ids if records[i].get("role") == "背景"]))
         source = st.selectbox("读取设置的文件", source_options, format_func=file_formatter(),
             key=f"condition_source_{purpose}", persist_state="session")
-        cfg = candidates[source]
-        is_background = cfg.get("role") == "背景"
-        group = cfg.get("group")
+        record = records[source]
+        resolved = configs[source]
+        is_background = record.get("role") == "背景"
+        group = record.get("group")
         scope_prefix = f"condition_scope_{purpose}_{source}_{st.session_state.revision}_"
         scope = st.segmented_control("应用范围", ["仅此文件", "当前组", "自选"],
             default="当前组", key=scope_prefix+"scope", persist_state="session")
         if scope == "自选":
             targets = st.multiselect("应用到文件", allowed_ids,
-                default=[i for i in ids if candidates[i].get("group") == group] or [source],
+                default=[i for i in ids if records[i].get("group") == group] or [source],
                 format_func=file_formatter(), key=scope_prefix+"custom", persist_state="session")
         elif scope == "仅此文件":
             targets = [source]
         else:
-            targets = [i for i in ids if candidates[i].get("group") == group] if source in ids else [source]
+            targets = [i for i in ids if records[i].get("group") == group] if source in ids else [source]
         st.caption(f"读取来源只用于显示。本次修改将把当前显示的整套条件复制到明确范围：{len(targets)} 个文件；切换来源或范围本身不复制条件。")
         with st.expander("查看应用范围"):
             st.write([st.session_state.traces[i].name for i in targets])
         background_ids = list(dict.fromkeys(bgid for ident in targets
-            for bgid in relevant_backgrounds(candidates[ident]) if bgid not in targets))
+            for bgid in relevant_backgrounds(records[ident]) if bgid not in targets))
         if background_ids:
-            names = "、".join(st.session_state.traces[i].name for i in background_ids)
-            st.info(f"关联背景：{names}。背景 pH 按其模式联动或独立保存；其他条件需要一致时，请在“自选”范围中明确加入背景。背景 pH 模式在“扫描与背景”中修改。")
+            background_names = "、".join(st.session_state.traces[i].name for i in background_ids)
+            st.info(f"关联背景：{background_names}。背景实验条件默认整组跟随关联样品；需要独立设置时，请在下方或在“扫描与背景”的背景面板中明确切换。")
+        domain = f"conditions:{source}"
+        display, states = _display_config(get_edit_configs(domain)[source], resolved)
+
+        def locked(field):
+            return not states.get(field, {}).get("editable", True)
+
+        if is_background and states:
+            info = resolved["background_conditions"]
+            st.caption(f"背景条件模式：{MODE_LABELS.get(info.get('mode'), info.get('mode'))} · "
+                       f"状态：{STATUS_LABELS.get(info.get('status'), info.get('status'))}。"
+                       f"{info.get('detail') or ''}")
+            st.caption("跟随中的字段只读并显示有效值；明确切到独立设置后才可直接修改。")
+            if st.button("切到独立设置", key=scope_prefix+"to_independent",
+                         disabled=info.get("mode") == "independent",
+                         help="保留既有独立记录；之后的背景条件修改独立于关联样品。"):
+                stage_background_mode(source, "independent", domain=domain)
+                st.rerun()
+            if info.get("mode") == "follow":
+                usable = view["view_basis"] in ("applied", "candidate") and info.get("status") == "following"
+                if st.button("用当前有效条件建立独立记录", key=scope_prefix+"adopt", disabled=not usable,
+                             help="仅复制当前换算方式实际使用的已知有效字段；未启用方式的历史缓存保持不变。"):
+                    stage_background_mode(source, "independent", domain=domain,
+                                          values=effective_independent_values(info))
+                    st.rerun()
+                if not usable:
+                    st.caption("等待、冲突或未绑定时没有一套完整有效条件可复制；请先补齐或统一关联样品条件。")
+            if info.get("mode") == "independent":
+                if st.button("改为跟随关联样品", key=scope_prefix+"to_follow",
+                             help="恢复整组跟随；独立记录原样保留，未应用的独立输入不混入跟随提交。"):
+                    stage_background_mode(source, "follow", domain=domain)
+                    st.rerun()
+            if info.get("mode") == "legacy_ph":
+                st.caption("旧版记录：仅 pH 联动可在“扫描与背景”管理；升级后整组条件按新策略生效。")
+                if st.button("升级为整组跟随（推荐）", key=scope_prefix+"upgrade_follow"):
+                    stage_background_mode(source, "follow", domain=domain)
+                    st.rerun()
         context = _fingerprint([purpose, source, targets, st.session_state.revision,
                                 axis, density, st.session_state.get("draft_epoch", 0)])
         views = st.session_state.setdefault("condition_editor_views", {})
         state = views.setdefault(context, {"epoch":0})
-        source_fingerprint = _fingerprint(snapshot_conditions(cfg))
+        source_fingerprint = _fingerprint({field: display.get(field) for field in WATCH_FIELDS})
         if state.get("source_fingerprint") not in (None, source_fingerprint):
             state["epoch"] += 1
             state.pop("values", None)
             state.pop("seed", None)
         state["source_fingerprint"] = source_fingerprint
-        cfg = state.get("seed", cfg)
+        display = state.get("seed", display)
         prefix = f"conditions_{context}_{state['epoch']}_{st.session_state.get('condition_editor_epoch',0)}_"
         draft_notice = st.empty()
         values = {}
         if axis == "RHE":
+            method_value = display.get("potential_method", "理论换算")
             method = st.selectbox("原始电位的换算方式 *", METHODS,
-                index=METHODS.index(cfg.get("potential_method", "理论换算")), key=prefix+"method", persist_state="session")
-            values["potential_method"] = method
+                index=METHODS.index(method_value) if method_value in METHODS else 0,
+                key=prefix+"method", persist_state="session", disabled=locked("potential_method"))
+            if not locked("potential_method"):
+                values["potential_method"] = method
             if method == "理论换算":
-                values["pH"] = st.number_input("pH *", value=_number_value(cfg, "pH"), step=.1,
-                    format="%.3f", key=prefix+"ph", persist_state="session")
-                values["temperature_C"] = st.number_input("温度 / °C *", value=_number_value(cfg, "temperature_C", lower=-20., upper=150., default=25.),
-                    min_value=-20., max_value=150., step=1., key=prefix+"temperature", persist_state="session")
-                st.caption("默认温度 25 °C；pH 不从不明确的文件名猜测。")
+                if not locked("pH"):
+                    values["pH"] = st.number_input("pH *", value=_number_value(display, "pH"), step=.1,
+                        format="%.3f", key=prefix+"ph", persist_state="session")
+                else:
+                    st.number_input("pH *", value=_number_value(display, "pH"), step=.1,
+                        format="%.3f", key=prefix+"ph", persist_state="session", disabled=True)
+                if not locked("temperature_C"):
+                    values["temperature_C"] = st.number_input("温度 / °C *", value=_number_value(display, "temperature_C", lower=-20., upper=150., default=25.),
+                        min_value=-20., max_value=150., step=1., key=prefix+"temperature", persist_state="session")
+                else:
+                    st.number_input("温度 / °C *", value=_number_value(display, "temperature_C", lower=-20., upper=150., default=25.),
+                        min_value=-20., max_value=150., step=1., key=prefix+"temperature", persist_state="session", disabled=True)
+                st.caption("新文件默认 pH 13、25 °C、SCE（饱和 KCl）；请按实际实验修改，参比预设仅适用于 25 °C。")
                 options = ["请选择参比", *REFERENCE_PRESETS]
-                saved_preset = "自定义 / 实测标定" if cfg.get("ref_V_SHE") is not None else "请选择参比"
-                for name, preset in REFERENCE_PRESETS.items():
-                    if preset and cfg.get("reference_preset_C") == 25 and cfg.get("reference") == preset[0] and cfg.get("filling") == preset[1] and cfg.get("ref_V_SHE") == preset[2]:
-                        saved_preset = name
+                saved_preset = "自定义 / 实测标定" if display.get("ref_V_SHE") is not None else "请选择参比"
+                for preset_name, preset in REFERENCE_PRESETS.items():
+                    if preset and display.get("reference_preset_C") == 25 and display.get("reference") == preset[0] and display.get("filling") == preset[1] and display.get("ref_V_SHE") == preset[2]:
+                        saved_preset = preset_name
+                reference_locked = locked("ref_V_SHE")
                 picked = st.selectbox("参比方案 *", options, index=options.index(saved_preset),
-                    key=prefix+"reference_preset", persist_state="session")
+                    key=prefix+"reference_preset", persist_state="session", disabled=reference_locked)
                 preset = REFERENCE_PRESETS.get(picked)
-                if preset:
+                if reference_locked:
+                    if preset:
+                        st.caption(f"{preset[0]} / {preset[1]} · E_ref vs SHE = {preset[2]:.3f} V · 仅限 25 °C · [文献来源]({preset[3]})；不是实测标定。")
+                elif preset:
                     values.update(reference=preset[0], filling=preset[1], ref_V_SHE=preset[2],
                                   reference_source=preset[3], reference_preset_C=25.)
                     st.caption(f"{preset[0]} / {preset[1]} · E_ref vs SHE = {preset[2]:.3f} V · 仅限 25 °C · [文献来源]({preset[3]})；不是实测标定。")
                 elif picked == "自定义 / 实测标定":
                     with st.expander("自定义参比参数", expanded=True):
-                        values["reference"] = st.text_input("参比电极名称", value=cfg.get("reference", "未设置"), key=prefix+"reference", persist_state="session")
-                        values["filling"] = st.text_input("参比内充液", value=cfg.get("filling", ""), key=prefix+"filling", persist_state="session")
-                        values["ref_V_SHE"] = st.number_input("该温度下 E_ref vs SHE / V *", value=_number_value(cfg, "ref_V_SHE"),
+                        values["reference"] = st.text_input("参比电极名称", value=display.get("reference", "未设置"), key=prefix+"reference", persist_state="session")
+                        values["filling"] = st.text_input("参比内充液", value=display.get("filling", ""), key=prefix+"filling", persist_state="session")
+                        values["ref_V_SHE"] = st.number_input("该温度下 E_ref vs SHE / V *", value=_number_value(display, "ref_V_SHE"),
                             format="%.5f", step=.001, key=prefix+"ref_v", persist_state="session")
                         values.update(reference_source="用户输入", reference_preset_C=None)
                 else:
                     values.update(ref_V_SHE=None, reference="未设置", filling="", reference_preset_C=None, reference_source="未选择")
             elif method == "实测 RHE 总偏移":
-                values["rhe_offset_V"] = st.number_input("实测 RHE 总偏移 / V *", value=_number_value(cfg, "rhe_offset_V"),
-                    format="%.5f", step=.001, key=prefix+"offset", persist_state="session")
+                if not locked("rhe_offset_V"):
+                    values["rhe_offset_V"] = st.number_input("实测 RHE 总偏移 / V *", value=_number_value(display, "rhe_offset_V"),
+                        format="%.5f", step=.001, key=prefix+"offset", persist_state="session")
+                else:
+                    st.number_input("实测 RHE 总偏移 / V *", value=_number_value(display, "rhe_offset_V"),
+                        format="%.5f", step=.001, key=prefix+"offset", persist_state="session", disabled=True)
                 st.caption("总偏移直接加到原始电位，不再叠加 pH。0 V 是有效输入。")
             else:
                 st.caption("按用户选择将原始电位视为 RHE，不再平移，不要求 pH 或参比。")
         else:
             st.caption("当前使用原始电位，绘图不要求填写 pH、参比换算值或 RHE 总偏移。")
         if (purpose == "kl" or density) and not is_background:
-            values.update(_area_controls(cfg, prefix))
+            values.update(_area_controls(display, prefix))
         if purpose == "rrde" and not is_background:
-            values["collection_efficiency"] = st.number_input("RRDE 收集效率 N（0–1） *", value=_number_value(cfg, "collection_efficiency", lower=.000001, upper=1.),
+            n_seed = .369 if display.get("collection_efficiency") is None else _number_value(display, "collection_efficiency", lower=.000001, upper=1.)
+            values["collection_efficiency"] = st.number_input("RRDE 收集效率 N（0–1） *", value=n_seed,
                 min_value=.000001, max_value=1., step=.01, format="%.5f", key=prefix+"N", persist_state="session")
-            st.caption(f"通道建议：盘 {cfg.get('disk_channel', 0) + 1} / 环 {cfg.get('ring_channel') + 1 if cfg.get('ring_channel') is not None else '未设置'}；请在“扫描与背景”中核对或修改。N 不设通用校准值。")
-        with st.expander("补充实验记录（选填）"):
-            electrolyte = st.text_input("电解液、浓度与气氛", value=cfg.get("electrolyte", ""),
-                placeholder="例如 O₂ 饱和 0.1 M NaOH", key=prefix+"electrolyte", persist_state="session")
-            # Apply the displayed source condition to every explicitly selected
-            # target, even when the source text itself was not edited.
-            values["electrolyte"] = electrolyte
-            st.json({"参数来源":cfg.get("parameter_sources", {}), "当前盘面积_cm2":cfg.get("area_cm2")})
+            st.caption("初始值 0.369，可按实际校准值修改。盘环通道可在“扫描与背景”中核对或修改。")
+            if display.get("collection_efficiency") is None and values["collection_efficiency"] == .369:
+                values["parameter_sources"] = {"collection_efficiency":"软件默认 0.369（可修改）"}
+        copy_values = dict(values)
+        for field in INHERITED_FIELDS:
+            if locked(field) and field not in copy_values:
+                copy_values[field] = display.get(field)
         previous_values = state.get("values")
+        semantic = lambda v: {k:value for k,value in (v or {}).items() if k != "parameter_sources"}
+        values_changed = previous_values is not None and semantic(values) != semantic(previous_values)
+        n_changed = previous_values is not None and values.get("collection_efficiency") != previous_values.get("collection_efficiency")
         copy_requested = st.button("复制当前条件到所选范围", disabled=not targets,
                                    key=prefix+"copy_scope")
         st.caption("复制仅加入本批草稿，不立即生效；下方统一应用设置。")
-        if copy_requested or previous_values is not None and values != previous_values:
+        n_default_pending = (purpose == "rrde" and not is_background
+                             and display.get("collection_efficiency") is None
+                             and values.get("collection_efficiency") == .369)
+        if copy_requested or n_default_pending or values_changed:
+            intent = copy_values if copy_requested else values
             try:
-                updates = condition_updates(candidates, targets, values,
-                    background_ph_edit=is_background)
+                updates = {}
+                default_only = n_default_pending and not copy_requested and not values_changed
+                for target in targets:
+                    target_intent = copy.deepcopy(intent)
+                    if default_only:
+                        target_intent = {"collection_efficiency":.369,
+                                         "parameter_sources":{"collection_efficiency":"软件默认 0.369（可修改）"}}
+                    if n_default_pending and records[target].get("collection_efficiency") is not None:
+                        target_intent.pop("collection_efficiency", None)
+                        target_intent.get("parameter_sources", {}).pop("collection_efficiency", None)
+                    elif not copy_requested and not n_changed and not default_only:
+                        target_intent.pop("collection_efficiency", None)
+                        target_intent.get("parameter_sources", {}).pop("collection_efficiency", None)
+                    updates.update(condition_updates(view, [target], target_intent, names=names,
+                        source="软件默认 0.369（可修改）" if default_only else "人工输入",
+                        background_ph_edit=is_background))
             except (DataError, ValueError, TypeError) as exc:
-                st.session_state.setdefault("draft_errors", {})[f"conditions:{source}"] = str(exc)
-                st.session_state["draft_error"] = str(exc)
+                reject_config_updates(domain, None, str(exc))
                 draft_notice.error(str(exc))
             else:
-                accepted = stage_config_updates(f"conditions:{source}", updates)
-                if accepted and updates:
-                    updated_source = get_draft_configs()[source]
-                    state["source_fingerprint"] = _fingerprint(snapshot_conditions(updated_source))
+                if stage_config_updates(domain, updates):
+                    fresh_display, _ = _display_config(get_edit_configs(domain)[source],
+                                                       get_draft_view()["configs"][source])
+                    state["source_fingerprint"] = _fingerprint({field: fresh_display.get(field) for field in WATCH_FIELDS})
         state["values"] = copy.deepcopy(values)
         if has_draft():
             draft_notice.warning("有未应用修改：已加入本批草稿。下方统一应用，或使用“应用并计算／导出”；当前结果仍对应已应用设置。")
-        _profiles(get_draft_configs()[source], source, targets,
-                  f"profiles_{purpose}_{source}_", context)

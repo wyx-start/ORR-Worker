@@ -129,7 +129,8 @@ class AnalysisActionTests(unittest.TestCase):
         widget(at.button, "计算 RRDE").click().run()
         self.assert_clean(at)
         self.assertIn("rrde_plot.csv", at.session_state.exports)
-        widget(at.number_input, "最小盘还原电流幅值 / A").set_value(2e-9).run()
+        at.session_state.settings["rrde"] = dict((at.session_state.settings["rrde"] if "rrde" in at.session_state.settings else {}), floor_A=2e-9)
+        at.run()
         self.assert_clean(at)
         self.assertNotIn("rrde", at.session_state.results)
         self.assertFalse(any(name.startswith("rrde_") for name in at.session_state.exports))
@@ -180,12 +181,45 @@ class AnalysisActionTests(unittest.TestCase):
 
     def test_project_restore_uses_saved_rrde_threshold(self):
         at = app("rrde.py", [fixture(400, ring=True)])
-        widget(at.number_input, "最小盘还原电流幅值 / A").set_value(2e-9).run()
+        at.session_state.settings["rrde"] = dict((at.session_state.settings["rrde"] if "rrde" in at.session_state.settings else {}), floor_A=2e-9)
+        at.run()
         restored = dict(at.session_state.settings)
         restored["rrde"] = {"floor_A": 8e-9}
         self.restore_settings(at, restored)
         self.assert_clean(at)
-        self.assertEqual(widget(at.number_input, "最小盘还原电流幅值 / A").value, 8e-9)
+        self.assertNotIn("最小盘还原电流幅值 / A", [e.label for e in at.number_input])
+        widget(at.button, "计算 RRDE").click().run()
+        self.assertEqual(at.session_state.results["rrde"]["inputs"]["floor_A"], 8e-9)
+        self.assertEqual(at.session_state.results["rrde"]["params"]["settings"]["rrde"]["floor_A"], 8e-9)
+
+    def test_invalid_saved_rrde_threshold_reports_error_without_old_downloads(self):
+        at = app("rrde.py", [fixture(400, ring=True)])
+        widget(at.button, "计算 RRDE").click().run()
+        self.assertIn("rrde", at.session_state.results)
+        at.session_state.settings["rrde"]["floor_A"] = -1.
+        at.run()
+        widget(at.button, "计算 RRDE").click().run()
+        self.assert_clean(at)
+        self.assertTrue(any("最小盘电流幅值" in e.value for e in at.error))
+        self.assertNotIn("rrde", at.session_state.results)
+        self.assertFalse(any(name.startswith("rrde_") for name in at.session_state.exports))
+
+    def test_kl_electrolyte_difference_has_targeted_repair_and_keeps_other_records(self):
+        fixtures = [fixture(400), fixture(900)]
+        fixtures[0][1]["electrolyte"] = "electrolyte A"
+        fixtures[1][1]["electrolyte"] = "electrolyte B"
+        at = app("kl.py", fixtures)
+        self.assertIn("修正阻断计算的电解液差异", [e.label for e in at.expander])
+        before = {i:cfg["pH"] for i,cfg in at.session_state.configs.items()}
+        widget(at.text_input, "实际电解液与气氛记录").set_value("verified electrolyte").run()
+        widget(at.button, "将电解液修正加入草稿").click().run()
+        at.run()
+        self.assertEqual(at.session_state.configs[fixtures[0][0].id]["electrolyte"], "electrolyte A")
+        widget(at.button, "应用设置").click().run()
+        self.assert_clean(at)
+        for ident,cfg in at.session_state.configs.items():
+            self.assertEqual(cfg["electrolyte"], "verified electrolyte")
+            self.assertEqual(cfg["pH"], before[ident])
 
     def test_kl_already_rhe_in_original_mode_exports_correct_coordinate_without_shift(self):
         fixtures = [fixture(400), fixture(900)]

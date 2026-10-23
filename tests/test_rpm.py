@@ -27,7 +27,10 @@ def without_provenance(project, value):
             if name=="project.json":
                 document=json.loads(raw)
                 document["app_version"]="1.1.0"
+                document["schema"]=1
                 cfg=document["files"][0]["config"]
+                cfg.pop("background_conditions_mode",None)
+                cfg.pop("background_conditions_migration",None)
                 for field in RPM_FIELDS:
                     if field!="rpm": cfg.pop(field,None)
                 cfg["rpm"]=value

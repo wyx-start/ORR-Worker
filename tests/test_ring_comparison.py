@@ -127,7 +127,11 @@ class RingProcessingTests(unittest.TestCase):
                 content=source.read(item)
                 if item=="project.json":
                     manifest=json.loads(content)
-                    for f in manifest["files"]: f["config"].pop("background_mode",None)
+                    manifest["schema"]=1
+                    for f in manifest["files"]:
+                        f["config"].pop("background_mode",None)
+                        f["config"].pop("background_conditions_mode",None)
+                        f["config"].pop("background_conditions_migration",None)
                     content=json.dumps(manifest).encode()
                 target.writestr(item,content)
         _,legacy,_=unpack_project(old.getvalue())
