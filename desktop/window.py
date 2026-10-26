@@ -35,21 +35,22 @@ class MainWindow(QMainWindow):
         self.direction=self.settings_pane.direction;self.table=self.settings_pane.table
         self.status=self.settings_pane.status;self.apply_button=self.settings_pane.apply_button
         self.tabs.addTab(self.settings_pane,"导入与设置")
-        curve=QWidget();cl=QVBoxLayout(curve);row=QHBoxLayout()
-        self.calculate_button=QPushButton("生成极化曲线")
-        self.calculate_button.clicked.connect(lambda:self.guard(self.calculate));row.addWidget(self.calculate_button)
-        for text,name in (("保存绘图 CSV","polarization_plot.csv"),("保存 PNG","polarization.png"),("保存 SVG","polarization.svg")):
-            button=QPushButton(text);button.clicked.connect(lambda checked=False,n=name:self.guard(lambda:self.export_file(n)));row.addWidget(button)
-        row.addStretch();cl.addLayout(row)
-        self.canvas=FigureCanvasQTAgg(new_figure());self.toolbar=NavigationToolbar2QT(self.canvas,self)
-        cl.addWidget(self.toolbar);cl.addWidget(self.canvas,1)
-        self.tabs.addTab(curve,"极化曲线")
-        for title in ("多转速 K–L","RRDE 选择性"):
-            index=self.tabs.addTab(QWidget(),title+"（迁移中）");self.tabs.setTabEnabled(index,False)
+        from desktop.analysis import AnalysisPane
+        self.analyses={}
+        for kind,title in (("curves","极化曲线"),("kl","多转速 K–L"),("rrde","RRDE 选择性")):
+            pane=AnalysisPane(self,kind);self.analyses[kind]=pane;self.tabs.addTab(pane,title)
+        self.calculate_button=self.analyses['curves'].calculate_button
+        self.canvas=self.analyses['curves'].canvas
         export=QWidget();el=QVBoxLayout(export)
-        self.exports=QComboBox();el.addWidget(QLabel("当前修订生成的文件；保存分析项目仍为独立入口。"));el.addWidget(self.exports)
-        save=QPushButton("保存所选结果");save.clicked.connect(lambda:self.guard(lambda:self.export_file(self.exports.currentText())));el.addWidget(save);el.addStretch()
+        el.addWidget(QLabel("绘图 CSV 在对应分析页优先导出；完整数据、参数和项目可分别保存。"))
+        self.export_buttons={}
+        for key,text,operation in (("data","导出全部完整数据 CSV",self.export_complete_data),("parameters","导出当前配置参数 JSON",self.export_parameters),("project","保存分析项目",self.save_project),("zip","保存当前全部结果 ZIP",self.export_zip)):
+            button=QPushButton(text);button.clicked.connect(lambda checked=False,f=operation:self.guard(f));el.addWidget(button);self.export_buttons[key]=button
+        self.exports=QComboBox();el.addWidget(self.exports)
+        save=QPushButton("保存所选结果文件");save.clicked.connect(lambda:self.guard(lambda:self.export_file(self.exports.currentText())));el.addWidget(save)
+        self.export_note=QLabel();self.export_note.setWordWrap(True);el.addWidget(self.export_note);el.addStretch()
         self.tabs.addTab(export,"导出与项目")
+        self.tabs.currentChanged.connect(lambda:self.update_actions())
         self.refresh()
 
     def guard(self, operation):
@@ -75,8 +76,37 @@ class MainWindow(QMainWindow):
 
     def refresh(self):
         self.settings_pane.refresh()
+        for pane in self.analyses.values():pane.refresh()
         self.exports.clear();self.exports.addItems(list(self.workspace.state.exports))
-        self.calculate_button.setText("应用并生成极化曲线" if self.workspace.has_draft() else "生成极化曲线")
+        self.update_actions()
+
+    def update_actions(self):
+        for pane in self.analyses.values():pane.update_buttons()
+        dirty=self.workspace.has_draft()
+        self.settings_pane.project_button.setText('应用并保存分析项目' if dirty else '保存分析项目')
+        for key,normal,pending in (('data','导出全部完整数据 CSV','应用并导出全部完整数据 CSV'),('parameters','导出当前配置参数 JSON','应用并导出当前配置参数 JSON'),('project','保存分析项目','应用并保存分析项目')):
+            self.export_buttons[key].setText(pending if dirty else normal)
+        self.export_buttons['zip'].setEnabled(not dirty)
+        if dirty:self.export_note.setText('有未应用修改。完整数据、配置参数与项目可合并应用；分析结果请在对应页重新计算后导出。')
+
+    def export_complete_data(self,path=None):
+        from application.results import complete_data
+        outputs,errors=complete_data(self.workspace);self.refresh()
+        self.export_note.setText(f"已处理 {len(outputs)} 个文件；"+'；'.join(f"{e['文件']}：{e['原因']}" for e in errors))
+        return self.export_file('all_curves.csv',path)
+
+    def export_parameters(self,path=None):
+        from orr_core import json_bytes
+        self.workspace.apply_pending_settings()
+        self.workspace.set_export('configuration_parameters.json',json_bytes(self.workspace.parameters()),'application/json')
+        self.refresh();return self.export_file('configuration_parameters.json',path)
+
+    def export_zip(self,path=None):
+        from application.data import zip_exports
+        if self.workspace.has_draft():raise DataError("请先在相应分析页应用并重新计算，再保存结果包。")
+        if not self.workspace.state.exports:raise DataError("请先生成分析结果。")
+        if path is None:path,_=QFileDialog.getSaveFileName(self,"保存全部结果","ORR_Worker_results.zip","结果包 (*.zip)")
+        if path:Path(path).write_bytes(zip_exports(self.workspace.state.exports))
 
     def load_conditions(self, *_):
         return self.settings_pane.load()
@@ -97,12 +127,7 @@ class MainWindow(QMainWindow):
         self.workspace.reset_draft();self.refresh();self.status.setText("已放弃未应用修改。")
 
     def calculate(self):
-        selected=[i for i,c in self.workspace.get_draft_view()['records'].items() if c.get('role')!='背景']
-        result=calculate_curves(self.workspace,selected)
-        self.canvas.figure=result['figure'];result['figure'].set_canvas(self.canvas);self.canvas.draw()
-        self.refresh();self.tabs.setCurrentIndex(1)
-        self.status.setText(f"已生成 {len(result['outputs'])} 条曲线。"+"；".join(e['原因'] for e in result['errors']))
-        return result
+        result=self.analyses['curves'].calculate();self.tabs.setCurrentIndex(1);return result
 
     def export_file(self, name, path=None):
         if self.workspace.has_draft():raise DataError("请先应用并生成当前结果，再保存。")

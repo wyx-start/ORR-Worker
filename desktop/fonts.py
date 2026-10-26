@@ -6,6 +6,10 @@ from PySide6.QtGui import QFont, QFontDatabase
 
 def ui_font():
     if not QFontDatabase.families():
-        path=Path(os.environ.get('WINDIR','C:/Windows'))/'Fonts'/'msyh.ttc'
-        if path.exists():QFontDatabase.addApplicationFont(str(path))
-    return QFont('Microsoft YaHei',10)
+        directory=Path(os.environ.get('WINDIR','C:/Windows'))/'Fonts'
+        for name in ('msyh.ttc','segoeui.ttf','seguisym.ttf','arial.ttf'):
+            path=directory/name
+            if path.exists():QFontDatabase.addApplicationFont(str(path))
+    font=QFont('Microsoft YaHei',10)
+    font.setFamilies(['Microsoft YaHei','Segoe UI','Segoe UI Symbol','Arial'])
+    return font

@@ -35,10 +35,10 @@ def combo(items):
 
 
 def table_from_rows(widget,rows):
-    keys=list(rows[0]) if rows else [];widget.setColumnCount(len(keys));widget.setRowCount(len(rows));widget.setHorizontalHeaderLabels(keys)
+    keys=list(dict.fromkeys(key for row in rows for key in row));widget.setColumnCount(len(keys));widget.setRowCount(len(rows));widget.setHorizontalHeaderLabels(keys)
     for r,row in enumerate(rows):
         for c,key in enumerate(keys):
-            value=row[key];text='' if value is None else ('是' if value else '否') if isinstance(value,bool) else str(value)
+            value=row.get(key);text='' if value is None else ('是' if value else '否') if isinstance(value,bool) else str(value)
             widget.setItem(r,c,QTableWidgetItem(text))
     widget.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     widget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -51,6 +51,7 @@ class SettingsPane(QWidget):
         for text,operation in (('导入文件',window.choose_files),('打开项目',window.open_project),('保存分析项目',window.save_project),
                                ('补全空白转速',self.fill_rpm),('移除选中文件',self.remove_selected)):
             button=QPushButton(text);button.clicked.connect(lambda checked=False,f=operation:window.guard(f));actions.addWidget(button)
+            if text=='保存分析项目':self.project_button=button
         actions.addStretch();layout.addLayout(actions)
         self.model=FileModel(self.w);self.table=QTableView();self.table.setModel(self.model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -227,6 +228,7 @@ class SettingsPane(QWidget):
 
     def on_change(self):
         self.load();self.window.calculate_button.setText('应用并生成极化曲线' if self.w.has_draft() else '生成极化曲线')
+        if hasattr(self.window,'update_actions'):self.window.update_actions()
 
     def show_draft(self):
         view=self.w.get_draft_view();box=QMessageBox(self);box.setWindowTitle('本次修改与拒绝输入')

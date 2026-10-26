@@ -10,7 +10,7 @@ ORR Worker 用于批量处理氧还原反应数据：从 CV 选择单向扫描�
 
 桌面改写已按阶段启动：[进度与验收](docs/migration/STAGE_LOG.md)。M1 浏览器版 exe 已通过本机冻结程序测试，[构建说明](docs/migration/M1_BROWSER_EXE.md)。M3 原生桌面最小流程也已通过真实 exe 本机验收，[试用范围与构建说明](docs/migration/M3_NATIVE_MINIMUM.md)；完整批量设置与分析继续迁移。用户当前无干净测试机，跨机器无 Python 验收尚未完成。
 
-桌面源码现已完成 M4 的条件、扫描、背景与批量设置迁移，[验收记录](docs/migration/M4_NATIVE_SETTINGS.md)。M3 试用包仍对应当阶段功能；完整分析与最终发行包继续在 M5—M7 完成。
+桌面源码已完成 [M4 条件、扫描、背景与批量设置](docs/migration/M4_NATIVE_SETTINGS.md)，以及 [M5 全部分析与导出](docs/migration/M5_NATIVE_ANALYSIS.md)。M3 试用包仍对应当阶段功能；后台任务、保存退出与最终发行包继续在 M6—M7 完成。
 
 ## 功能
 
