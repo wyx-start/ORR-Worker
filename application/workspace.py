@@ -61,6 +61,16 @@ class Workspace:
         from application.analysis import calculate_kl
         return calculate_kl(self, inputs)
 
+    def remove_files(self, identifiers):
+        if self.has_draft():raise DataError("请先应用或放弃草稿，再移除文件。")
+        identifiers=set(identifiers)
+        for ident in identifiers:
+            self.state.traces.pop(ident,None);self.state.configs.pop(ident,None)
+        for config in self.state.configs.values():
+            for field in ('background_disk','background_ring'):
+                if config.get(field) in identifiers:config[field]=None
+        self.invalidate()
+
     def initialize(self):
         defaults = {"traces": {}, "configs": {}, "revision": 0, "results": {}, "exports": {},
                     "import_errors": [], "settings": {"axis": "RHE", "kl": {}, "plot": {}, "presets": {}},

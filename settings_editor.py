@@ -1,6 +1,7 @@
 """Scientific editors only stage changes; the shared action applies them."""
 from copy import deepcopy
 import json
+from application.editing import effective_independent_values
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
@@ -30,64 +31,11 @@ def _changed(context, values):
 
 
 def stage_background_mode(ident, mode, *, domain=None, values=None, source_label="用户复制：当前有效条件"):
-    """Replace condition-strategy intent atomically, preserving unrelated edits."""
-    from ui_shared import stage_config_updates
-    patch = {"background_conditions_mode": mode}
-    if values:
-        patch.update(deepcopy(values))
-        patch["parameter_sources"] = {field: source_label for field in values}
-    domain = domain or f"background_conditions:{ident}"
-    keys = ("settings_draft", "rejected_config_edits", "draft_errors", "draft_error", "draft_retryable_domains")
-    before = {key: deepcopy(st.session_state[key]) for key in keys if key in st.session_state}
-    related = set(INHERITED_FIELDS) | {"background_conditions_mode", "background_ph_mode", "background_ph_legacy"}
-    peers = {domain, f"background_conditions:{ident}", f"conditions:{ident}", f"background_ph:{ident}"}
-    # Work on detached structures; only condition leaves for this background
-    # are superseded by the explicit mode action. Area and other files survive.
-    draft = deepcopy(st.session_state.settings_draft)
-    rejected = deepcopy(st.session_state.get("rejected_config_edits", {}))
-    errors = deepcopy(st.session_state.get("draft_errors", {}))
-    for collection in (draft["configs"], rejected):
-        for peer in peers:
-            files = collection.get(peer, {})
-            entry = files.get(ident)
-            if entry is None:
-                continue
-            kept = {k: v for k, v in entry.items() if k not in related and k != "parameter_sources"}
-            sources = {k:v for k,v in entry.get("parameter_sources", {}).items() if k not in related}
-            if sources:
-                kept["parameter_sources"] = sources
-            if kept:
-                files[ident] = kept
-            else:
-                files.pop(ident, None)
-            if not files:
-                collection.pop(peer, None)
-                if collection is rejected:
-                    errors.pop(peer, None)
-    st.session_state.settings_draft = draft
-    st.session_state.rejected_config_edits = rejected
-    st.session_state.draft_errors = errors
-    if stage_config_updates(domain, {ident: patch}):
-        return True
-    failed = st.session_state.get("draft_error", "背景条件模式未能加入草稿。")
-    for key in keys:
-        if key in before:
-            st.session_state[key] = before[key]
-        else:
-            st.session_state.pop(key, None)
-    from ui_shared import reject_config_updates
-    return reject_config_updates(domain, {ident:patch}, failed)
+    from application.workspace import Workspace
+    from application.editing import stage_background_mode as stage
+    return stage(Workspace(st.session_state), ident, mode, domain=domain, values=values, source_label=source_label)
 
 
-def effective_independent_values(info):
-    """Only the currently active, known effective fields; None never clears caches."""
-    values = {}
-    for field in INHERITED_FIELDS:
-        state = info.get("field_states", {}).get(field, {})
-        value = info.get("effective", {}).get(field)
-        if state.get("active") and value is not None:
-            values[field] = deepcopy(value)
-    return values
 
 
 def _mode_buttons(ident, info, view_basis, key, domain):

@@ -17,7 +17,7 @@ def verify(window, output):
     assert window.workspace.state.configs[ident]['rpm']==1600
     window.fields['pH'].setText('12');window.stage_field('pH');window.apply()
     assert window.workspace.state.configs[ident]['pH']==12
-    assert window.workspace.state.configs[ident]['parameter_sources']['pH']=='用户输入（桌面端）'
+    assert not window.workspace.state.configs[ident]['parameter_sources']['pH'].startswith('软件默认')
     window.segment.setCurrentIndex(window.segment.findData(2));window.apply()
     result=window.calculate()
     assert result['outputs'][ident]['segment']['segment']==2

@@ -28,39 +28,13 @@ class MainWindow(QMainWindow):
         self.resize(1220, 850)
         self.setAcceptDrops(True)
         self.tabs = QTabWidget();self.setCentralWidget(self.tabs)
-        page=QWidget();layout=QVBoxLayout(page)
-        actions=QHBoxLayout()
-        for text, callback in (("导入文件",self.choose_files),("打开项目",self.open_project),
-                               ("保存分析项目",self.save_project)):
-            button=QPushButton(text);button.clicked.connect(lambda checked=False,f=callback:self.guard(f));actions.addWidget(button)
-        actions.addStretch();layout.addLayout(actions)
-        self.table=QTableWidget(0,5)
-        self.table.setHorizontalHeaderLabels(["文件","样品","用途","转速 / rpm","数据点"])
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.table,1)
-        self.source=QComboBox();self.source.currentIndexChanged.connect(self.load_conditions)
-        form=QFormLayout();form.addRow("要修改的文件",self.source)
-        self.fields={}
-        for field,label in (("pH","pH *"),("temperature_C","温度 / °C *"),("reference","参比电极 *"),
-                            ("filling","参比内充液"),("ref_V_SHE","E_ref vs SHE / V *")):
-            widget=QLineEdit();widget.editingFinished.connect(lambda f=field:self.stage_field(f));self.fields[field]=widget
-            form.addRow(label,widget)
-        self.direction=QComboBox();self.direction.addItems(["递减","递增"])
-        self.direction.currentTextChanged.connect(lambda value:self.stage_patch({"direction":value}))
-        self.mode=QComboBox();self.mode.addItems(["A","B"])
-        self.mode.currentTextChanged.connect(lambda value:self.stage_patch({"mode":value,"manual_segment":None}))
-        self.segment=QComboBox();self.segment.currentIndexChanged.connect(self.stage_segment)
-        form.addRow("扫描方向",self.direction);form.addRow("自动规则",self.mode);form.addRow("扫描段",self.segment)
-        layout.addLayout(form)
-        row=QHBoxLayout()
-        self.apply_button=QPushButton("应用设置");self.apply_button.clicked.connect(lambda:self.guard(self.apply))
-        row.addWidget(self.apply_button)
-        discard=QPushButton("放弃未应用修改");discard.clicked.connect(lambda:self.guard(self.discard));row.addWidget(discard)
-        row.addStretch();layout.addLayout(row)
-        self.status=QLabel("拖入 TXT / CSV / DAT，或打开分析项目。默认 pH 13、SCE、5 mm RDE；* 为所需条件。")
-        self.status.setWordWrap(True);layout.addWidget(self.status)
-        self.tabs.addTab(page,"导入与设置")
+        from desktop.settings import SettingsPane
+        self.settings_pane=SettingsPane(self)
+        self.source=self.settings_pane.source;self.fields=self.settings_pane.fields
+        self.segment=self.settings_pane.segment;self.mode=self.settings_pane.mode
+        self.direction=self.settings_pane.direction;self.table=self.settings_pane.table
+        self.status=self.settings_pane.status;self.apply_button=self.settings_pane.apply_button
+        self.tabs.addTab(self.settings_pane,"导入与设置")
         curve=QWidget();cl=QVBoxLayout(curve);row=QHBoxLayout()
         self.calculate_button=QPushButton("生成极化曲线")
         self.calculate_button.clicked.connect(lambda:self.guard(self.calculate));row.addWidget(self.calculate_button)
@@ -100,62 +74,21 @@ class MainWindow(QMainWindow):
         return count
 
     def refresh(self):
-        self.loading=True
-        current=self.source.currentData();self.source.clear()
-        state=self.workspace.state;records=self.workspace.get_edit_configs("conditions")
-        self.table.setRowCount(len(state.traces))
-        for row,(ident,trace) in enumerate(state.traces.items()):
-            config=records[ident];self.source.addItem(trace.name,ident)
-            for col,value in enumerate((trace.name,config.get("name"),config.get("role"),config.get("rpm"),len(trace.values))):
-                self.table.setItem(row,col,QTableWidgetItem("" if value is None else str(value)))
-        index=self.source.findData(current);self.source.setCurrentIndex(max(index,0))
-        self.exports.clear();self.exports.addItems(list(state.exports))
-        self.loading=False;self.load_conditions()
+        self.settings_pane.refresh()
+        self.exports.clear();self.exports.addItems(list(self.workspace.state.exports))
         self.calculate_button.setText("应用并生成极化曲线" if self.workspace.has_draft() else "生成极化曲线")
 
     def load_conditions(self, *_):
-        if self.loading:return
-        ident=self.source.currentData()
-        self.loading=True
-        self.segment.clear();self.segment.addItem("自动选择最后完整支线",None)
-        if ident:
-            cfg=self.workspace.get_edit_configs("conditions")[ident]
-            for field,widget in self.fields.items():widget.setText("" if cfg.get(field) is None else str(cfg[field]))
-            self.direction.setCurrentText(cfg.get("direction","递减"));self.mode.setCurrentText(cfg.get("mode","A"))
-            try:
-                for s in scan_segments(self.workspace.state.traces[ident]):
-                    self.segment.addItem(f"第 {s['segment']} 段 · {s['direction']} · {'完整' if s['complete'] else '不完整'} · {s['points']} 点",s["segment"])
-                index=self.segment.findData(cfg.get("manual_segment"));self.segment.setCurrentIndex(max(index,0))
-            except DataError as exc:self.status.setText(str(exc))
-        self.loading=False
+        return self.settings_pane.load()
 
     def stage_field(self, field):
-        if self.loading:return
-        value=self.fields[field].text().strip()
-        try:
-            if field in ("pH","temperature_C","ref_V_SHE"):value=float(value) if value else None
-            patch={field:value}
-            if field in ("reference","filling","ref_V_SHE"):patch.update(reference_preset_C=None,reference_source="用户输入")
-            self.stage_patch(patch)
-        except ValueError:self.status.setText("请输入数值，或留空表示未知。")
+        return self.settings_pane.stage_field(field)
 
     def stage_patch(self, patch):
-        if self.loading or not self.source.currentData():return
-        ident=self.source.currentData();records=self.workspace.get_edit_configs("conditions")
-        if all(records[ident].get(k)==v for k,v in patch.items()):return
-        fields={key:"用户输入（桌面端）" for key in patch if key in self.fields}
-        if fields:patch=dict(patch,parameter_sources=fields)
-        self.workspace.stage_config_updates("conditions",{ident:patch})
-        self.status.setText(self.workspace.state.get("draft_error") or "有未应用修改。")
-        self.calculate_button.setText("应用并生成极化曲线")
+        return self.settings_pane.stage_patch(patch)
 
     def stage_segment(self, *_):
-        if self.loading:return
-        value=self.segment.currentData();patch={"manual_segment":value}
-        if value:
-            selected=next(s for s in scan_segments(self.workspace.state.traces[self.source.currentData()]) if s['segment']==value)
-            patch['direction']=selected['direction']
-        self.stage_patch(patch)
+        return self.settings_pane.stage_segment()
 
     def apply(self):
         self.workspace.apply_pending_settings();self.refresh();self.status.setText("设置已应用；请重新生成曲线。")
