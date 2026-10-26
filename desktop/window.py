@@ -15,13 +15,18 @@ from application.figures import new_figure
 from application.curves import calculate_curves
 from orr_core import DataError, scan_segments
 from desktop.fonts import ui_font
+from desktop.lifecycle import DesktopLifecycle
+from desktop.jobs import JobController
+from application.tasks import atomic_write
 
 
-class MainWindow(QMainWindow):
+class MainWindow(DesktopLifecycle,QMainWindow):
     def __init__(self, workspace=None):
         super().__init__()
         self.setFont(ui_font())
         self.workspace = workspace or Workspace()
+        self._ui_epoch=0
+        self.jobs=JobController(self.workspace,lambda:self._ui_epoch,self)
         self.loading = False
         self.force_close = False
         self.setWindowTitle("ORR Worker · 桌面版预览")
@@ -44,23 +49,25 @@ class MainWindow(QMainWindow):
         export=QWidget();el=QVBoxLayout(export)
         el.addWidget(QLabel("绘图 CSV 在对应分析页优先导出；完整数据、参数和项目可分别保存。"))
         self.export_buttons={}
-        for key,text,operation in (("data","导出全部完整数据 CSV",self.export_complete_data),("parameters","导出当前配置参数 JSON",self.export_parameters),("project","保存分析项目",self.save_project),("zip","保存当前全部结果 ZIP",self.export_zip)):
+        for key,text,operation in (("data","导出全部完整数据 CSV",self.choose_data_export),("parameters","导出当前配置参数 JSON",self.choose_parameters_export),("project","保存分析项目",self.choose_save_project),("zip","保存当前全部结果 ZIP",self.choose_zip_export)):
             button=QPushButton(text);button.clicked.connect(lambda checked=False,f=operation:self.guard(f));el.addWidget(button);self.export_buttons[key]=button
         self.exports=QComboBox();el.addWidget(self.exports)
-        save=QPushButton("保存所选结果文件");save.clicked.connect(lambda:self.guard(lambda:self.export_file(self.exports.currentText())));el.addWidget(save)
+        save=QPushButton("保存所选结果文件");save.clicked.connect(lambda:self.guard(self.choose_asset_export));el.addWidget(save);self.asset_export_button=save
         self.export_note=QLabel();self.export_note.setWordWrap(True);el.addWidget(self.export_note);el.addStretch()
         self.tabs.addTab(export,"导出与项目")
         self.tabs.currentChanged.connect(lambda:self.update_actions())
+        self.setup_lifecycle()
         self.refresh()
 
     def guard(self, operation):
         try:return operation()
-        except (DataError,ValueError,TypeError,OSError,IndexError) as exc:
+        except (DataError,ValueError,TypeError,OSError,IndexError,RuntimeError) as exc:
             self.status.setText(str(exc));QMessageBox.warning(self,"请核对设置",str(exc))
 
     def choose_files(self):
+        self.ensure_idle()
         names,_=QFileDialog.getOpenFileNames(self,"导入实验文件","","实验文本 (*.txt *.csv *.dat)")
-        if names:self.import_paths(names)
+        if names:self.request_import(names)
 
     def import_paths(self, names):
         files=[];errors=[]
@@ -87,6 +94,12 @@ class MainWindow(QMainWindow):
         for key,normal,pending in (('data','导出全部完整数据 CSV','应用并导出全部完整数据 CSV'),('parameters','导出当前配置参数 JSON','应用并导出当前配置参数 JSON'),('project','保存分析项目','应用并保存分析项目')):
             self.export_buttons[key].setText(pending if dirty else normal)
         self.export_buttons['zip'].setEnabled(not dirty)
+        busy=self.jobs.busy
+        for button in self.export_buttons.values():button.setEnabled(not busy)
+        self.export_buttons['zip'].setEnabled(not dirty and not busy)
+        self.asset_export_button.setEnabled(not dirty and not busy)
+        self.settings_pane.project_button.setEnabled(not busy)
+        if hasattr(self,'project_state_label'):self.update_project_state()
         if dirty:self.export_note.setText('有未应用修改。完整数据、配置参数与项目可合并应用；分析结果请在对应页重新计算后导出。')
 
     def export_complete_data(self,path=None):
@@ -106,7 +119,7 @@ class MainWindow(QMainWindow):
         if self.workspace.has_draft():raise DataError("请先在相应分析页应用并重新计算，再保存结果包。")
         if not self.workspace.state.exports:raise DataError("请先生成分析结果。")
         if path is None:path,_=QFileDialog.getSaveFileName(self,"保存全部结果","ORR_Worker_results.zip","结果包 (*.zip)")
-        if path:Path(path).write_bytes(zip_exports(self.workspace.state.exports))
+        if path:atomic_write(path,zip_exports(self.workspace.state.exports))
 
     def load_conditions(self, *_):
         return self.settings_pane.load()
@@ -133,26 +146,29 @@ class MainWindow(QMainWindow):
         if self.workspace.has_draft():raise DataError("请先应用并生成当前结果，再保存。")
         if name not in self.workspace.state.exports:raise DataError("请先生成相应结果。")
         if path is None:path,_=QFileDialog.getSaveFileName(self,"保存结果",name)
-        if path:Path(path).write_bytes(self.workspace.state.exports[name]['bytes'])
+        if path:atomic_write(path,self.workspace.state.exports[name]['bytes'])
 
     def save_project(self, path=None):
         if path is None:path,_=QFileDialog.getSaveFileName(self,"保存分析项目","ORR_Worker_analysis.orrproj","分析项目 (*.orrproj)")
         if path:
-            Path(path).write_bytes(self.workspace.project_bytes());self.refresh();self.status.setText("项目已保存。")
+            from application.tasks import snapshot,execute
+            result=execute(snapshot(self.workspace,'project',{'target':str(path),'inputs':self.collect_project_inputs()}))
+            result['prepared'].publish();self.workspace.state.clear();self.workspace.state.update(result['state'])
+            self.mark_project_saved(path);self.refresh();self.status.setText("项目已保存。")
 
     def open_project(self, path=None):
         if path is None:path,_=QFileDialog.getOpenFileName(self,"打开分析项目","","分析项目 (*.orrproj)")
         if path:
-            self.workspace.restore_project(Path(path).read_bytes());self.refresh();self.status.setText("项目已恢复；重新生成分析结果。")
+            self.workspace.restore_project(Path(path).read_bytes());self.mark_project_saved(path);self.refresh();self.status.setText("项目已恢复；重新生成分析结果。")
 
     def dragEnterEvent(self,event):
         if event.mimeData().hasUrls():event.acceptProposedAction()
 
     def dropEvent(self,event):
-        self.guard(lambda:self.import_paths([u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]))
+        paths=[u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        if len(paths)==1 and Path(paths[0]).suffix.lower()=='.orrproj':self.guard(lambda:self.request_load(paths[0]))
+        elif any(Path(path).suffix.lower()=='.orrproj' for path in paths):self.status.setText('项目文件请单独拖入；实验文件可以批量拖入。')
+        else:self.guard(lambda:self.request_import(paths))
 
     def closeEvent(self,event):
-        if not self.force_close and self.workspace.has_draft():
-            answer=QMessageBox.question(self,"未应用修改","放弃未应用修改并退出？")
-            if answer!=QMessageBox.StandardButton.Yes:event.ignore();return
-        event.accept()
+        return self.native_close_event(event)

@@ -7,7 +7,9 @@ from orr_core import DataError,json_bytes,parameter_record
 
 def publish_figures(workspace,figures):
     for name,figure in figures.items():
+        workspace.checkpoint()
         png,svg=figure_bytes(figure)
+        workspace.checkpoint()
         workspace.set_export(name+'.png',png,'image/png');workspace.set_export(name+'.svg',svg,'image/svg+xml')
 
 
@@ -73,3 +75,11 @@ def complete_data(workspace):
     payload=csv_bytes(merged_data(outputs));params=json_bytes(parameter_record(workspace.state.traces,configs,settings,outputs))
     workspace.apply_pending_settings();workspace.set_export('all_curves.csv',payload,'text/csv');workspace.set_export('parameters.json',params,'application/json')
     return outputs,errors
+
+
+def coverage_preview(workspace,selected):
+    configs,settings=workspace.pending_candidate();outputs,errors=workspace.process_selected(selected,configs,settings,channels='disk')
+    if errors or not outputs or len(outputs)!=len(selected):raise DataError('共同覆盖需要全部所选文件可处理。'+'；'.join(e['文件']+'：'+e['原因'] for e in errors))
+    low=max(float(o['data'].E_V.min()) for o in outputs.values());high=min(float(o['data'].E_V.max()) for o in outputs.values())
+    if low>=high:raise DataError('所选曲线没有共同覆盖。')
+    return {'start':low,'end':high}

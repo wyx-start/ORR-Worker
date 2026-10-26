@@ -48,7 +48,7 @@ class SettingsPane(QWidget):
     def __init__(self,window):
         super().__init__();self.window=window;self.w=window.workspace;self.loading=True
         layout=QVBoxLayout(self);actions=QHBoxLayout()
-        for text,operation in (('导入文件',window.choose_files),('打开项目',window.open_project),('保存分析项目',window.save_project),
+        for text,operation in (('导入文件',window.choose_files),('打开项目',window.choose_project),('保存分析项目',window.choose_save_project),
                                ('补全空白转速',self.fill_rpm),('移除选中文件',self.remove_selected)):
             button=QPushButton(text);button.clicked.connect(lambda checked=False,f=operation:window.guard(f));actions.addWidget(button)
             if text=='保存分析项目':self.project_button=button
@@ -206,11 +206,8 @@ class SettingsPane(QWidget):
                 segments=scan_segments(self.w.state.traces[ident]);table_from_rows(self.segments_table,segments)
                 for s in segments:self.segment.addItem(f"第 {s['segment']} 段 · {s['direction']} · {'完整' if s['complete'] else '不完整'}",s['segment'])
                 self.segment.setCurrentIndex(max(self.segment.findData(cfg.get('manual_segment')),0))
-                trace=self.w.state.traces[ident];fig=new_figure(7,2.4);ax=fig.subplots();ax.plot(trace.values[:,0],color='#aab5b9')
-                try:
-                    chosen=select_segment(trace,cfg);a,b=chosen['start'],chosen['end'];ax.plot(range(a,b+1),trace.values[a:b+1,0],color='#167d8d',lw=2)
-                except DataError as exc:ax.set_title(str(exc),fontsize=8)
-                ax.set(xlabel='Acquisition row (zero-based)',ylabel='Original E / V');self.scan_canvas.figure=fig;fig.set_canvas(self.scan_canvas);self.scan_canvas.draw()
+                if not getattr(self.window,'jobs',None) or not self.window.jobs.busy:
+                    self.draw_scan(ident,cfg)
             except DataError as exc:self.status.setText(str(exc));table_from_rows(self.segments_table,[])
             self.render_background(view,info)
             method=cfg.get('potential_method');theory=self.axis.currentText()=='RHE' and method=='理论换算'
@@ -229,6 +226,19 @@ class SettingsPane(QWidget):
     def on_change(self):
         self.load();self.window.calculate_button.setText('应用并生成极化曲线' if self.w.has_draft() else '生成极化曲线')
         if hasattr(self.window,'update_actions'):self.window.update_actions()
+
+    def draw_scan(self,ident,cfg):
+        trace=self.w.state.traces[ident];fig=new_figure(7,2.4);ax=fig.subplots();ax.plot(trace.values[:,0],color='#aab5b9')
+        try:
+            chosen=select_segment(trace,cfg);a,b=chosen['start'],chosen['end'];ax.plot(range(a,b+1),trace.values[a:b+1,0],color='#167d8d',lw=2)
+        except DataError as exc:ax.set_title(str(exc),fontsize=8)
+        ax.set(xlabel='Acquisition row (zero-based)',ylabel='Original E / V');self.scan_canvas.figure=fig;fig.set_canvas(self.scan_canvas);self.scan_canvas.draw()
+
+    def refresh_scan(self):
+        ident=self.source.currentData()
+        if ident in self.w.state.traces:
+            try:self.draw_scan(ident,self.w.get_edit_configs(self.domain())[ident])
+            except (DataError,ValueError,IndexError):pass
 
     def show_draft(self):
         view=self.w.get_draft_view();box=QMessageBox(self);box.setWindowTitle('本次修改与拒绝输入')

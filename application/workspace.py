@@ -30,6 +30,8 @@ def _difference(value, base):
 class Workspace:
     def __init__(self, state=None):
         self.state = state if state is not None else State()
+        self.checkpoint=lambda:None
+        self.progress=lambda percent,message:None
         self.initialize()
 
     def snapshot(self):
@@ -277,7 +279,9 @@ class Workspace:
         configs = configs if configs is not None else self.state.configs
         settings = settings if settings is not None else self.state.settings
         outputs, errors = {}, []
-        for ident in ids:
+        ids=list(ids)
+        for index,ident in enumerate(ids):
+            self.checkpoint()
             if ident not in configs or configs[ident].get("role") == "背景":
                 continue
             try:
@@ -286,6 +290,8 @@ class Workspace:
                     channels=channels, subtract_background=subtract_background)
             except (DataError, ValueError, TypeError, IndexError) as exc:
                 errors.append({"文件":self.state.traces[ident].name, "原因":str(exc)})
+            self.progress(int(70*(index+1)/max(len(ids),1)),self.state.traces[ident].name)
+        self.checkpoint()
         return outputs, errors
 
     def invalidate(self):
@@ -314,7 +320,9 @@ class Workspace:
             raise DataError("有未应用修改。请先应用或放弃草稿，再导入新文件；现有草稿已保留。")
         errors = []
         added = 0
-        for name, raw in files:
+        files=list(files)
+        for index,(name, raw) in enumerate(files):
+            self.checkpoint()
             try:
                 trace = self.cached_parse(name, raw)
                 if trace.id not in self.state.traces:
@@ -324,6 +332,8 @@ class Workspace:
                     added += 1
             except (DataError, ValueError, TypeError) as exc:
                 errors.append({"文件": name, "原因": str(exc)})
+            self.progress(int(20+60*(index+1)/max(len(files),1)),name)
+        self.checkpoint()
         self.state.import_errors = errors
         if added:
             self.invalidate()

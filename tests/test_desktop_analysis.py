@@ -117,9 +117,12 @@ class DesktopAnalysisTests(unittest.TestCase):
         self.assertIsNone(pane.saved);self.assertNotIn('rrde_plot.csv',self.w.state.exports);self.assertEqual(pane.figure_choice.count(),0)
 
     def test_fit_potential_updates_display_and_export_image(self):
-        pane=self.kl();pane.calculate();first=self.w.state.exports['kl_fit.png']['bytes']
+        import hashlib
+        pane=self.kl();pane.calculate();first=hashlib.sha256(self.w.state.exports['kl_fit.png']['bytes']).hexdigest()
         pane.fit_potential.setCurrentIndex(0)
-        self.assertNotEqual(first,self.w.state.exports['kl_fit.png']['bytes'])
+        from desktop.jobs import wait_for_idle
+        wait_for_idle(self.win.jobs)
+        self.assertNotEqual(first,hashlib.sha256(self.w.state.exports['kl_fit.png']['bytes']).hexdigest(),pane.note.text())
         self.assertIn(f"{pane.fit_potential.currentData():.4f}",pane.figures['kl_fit'].axes[0].get_title())
         params=json.loads(self.w.state.exports['kl_parameters.json']['bytes'])
         self.assertEqual(params['analysis_display']['fit_potential_V'],pane.fit_potential.currentData())

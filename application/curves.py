@@ -67,7 +67,9 @@ def calculate_curves(workspace,selected,channel='disk',*,commit=True):
     result=dict(figure=fig,outputs=outputs,plotted=plotted,errors=errors,plot=wide,channel=channel,
         smoothing_report=reports,comparison_audit=audit,options=options,revision=workspace.state.revision)
     if commit:
+        workspace.checkpoint()
         png,svg=figure_bytes(fig);name='ring_current' if is_ring else 'polarization'
+        workspace.checkpoint()
         payloads={name+'_plot.csv':(csv_bytes(wide),'text/csv'),name+'_data.csv':(csv_bytes(merged_data(plotted)),'text/csv'),
             name+'.png':(png,'image/png'),name+'.svg':(svg,'image/svg+xml'),
             ('ring_current_parameters.json' if is_ring else 'parameters.json'):(json_bytes(parameter_record(workspace.state.traces,configs,scientific,outputs)),'application/json')}

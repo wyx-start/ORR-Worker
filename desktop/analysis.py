@@ -14,6 +14,7 @@ from application.figures import new_figure
 from application.editing import condition_updates
 from plot_smoothing import PRESET_WINDOWS,smoothing_defaults
 from orr_core import DataError,KOH_PRESET,kl_condition_differences
+from orr_core import json_bytes
 from desktop.settings import combo,table_from_rows
 
 FIGURE_LABELS={'polarization':'极化曲线','ring_current':'环电流比较','kl_electron_number':'K–L 表观电子数',
@@ -39,19 +40,20 @@ class AnalysisPane(QWidget):
         else:self.rrde_controls(left)
         left.addStretch()
         main=QWidget();ml=QVBoxLayout(main);split.addWidget(main);split.setSizes([310,900])
-        actions=QHBoxLayout();self.calculate_button=QPushButton();self.calculate_button.clicked.connect(lambda:window.guard(self.calculate));actions.addWidget(self.calculate_button)
-        self.csv_button=QPushButton('保存绘图 CSV');self.csv_button.clicked.connect(lambda:window.guard(self.export_csv));actions.addWidget(self.csv_button)
-        self.png_button=QPushButton('保存 PNG');self.png_button.clicked.connect(lambda:window.guard(self.export_png));actions.addWidget(self.png_button)
+        actions=QHBoxLayout();self.calculate_button=QPushButton();self.calculate_button.clicked.connect(lambda:window.guard(self.request_calculate));actions.addWidget(self.calculate_button)
+        self.csv_button=QPushButton('保存绘图 CSV');self.csv_button.clicked.connect(lambda:window.guard(self.request_csv));actions.addWidget(self.csv_button)
+        self.png_button=QPushButton('保存 PNG');self.png_button.clicked.connect(lambda:window.guard(self.request_png));actions.addWidget(self.png_button)
         actions.addStretch();ml.addLayout(actions)
         self.note=QLabel('选择文件并计算。');self.note.setWordWrap(True);ml.addWidget(self.note)
         self.figure_choice=QComboBox();self.figure_choice.currentIndexChanged.connect(lambda:self.show_figure(self.figure_choice.currentData()));ml.addWidget(self.figure_choice)
         self.canvas=FigureCanvasQTAgg(new_figure());ml.addWidget(NavigationToolbar2QT(self.canvas,self));ml.addWidget(self.canvas,1)
-        self.fit_potential=QComboBox();self.fit_potential.currentIndexChanged.connect(self.change_fit)
+        self.fit_potential=QComboBox();self.fit_potential.currentIndexChanged.connect(self.request_fit)
         self.fit_potential.setVisible(kind=='kl');ml.addWidget(self.fit_potential)
         self.details=QGroupBox('处理记录、条件差异与异常点');self.details.setCheckable(True);self.details.setChecked(False)
         dl=QVBoxLayout(self.details);self.table=QTableWidget();self.table.setMaximumHeight(220);dl.addWidget(self.table);self.table.setVisible(False);self.details.toggled.connect(self.table.setVisible);ml.addWidget(self.details)
         extra=QHBoxLayout();self.extra=QComboBox();extra.addWidget(QLabel('更多导出'));extra.addWidget(self.extra,1)
-        button=QPushButton('保存所选文件');button.clicked.connect(lambda:window.guard(lambda:self.export_extra()));extra.addWidget(button);ml.addLayout(extra)
+        button=QPushButton('保存所选文件');button.clicked.connect(lambda:window.guard(self.request_extra));extra.addWidget(button);ml.addLayout(extra);self.extra_button=button
+        self._needs_blank=False
         self.loading=False
 
     def line(self,form,label,key,default=''):
@@ -87,7 +89,7 @@ class AnalysisPane(QWidget):
         for widget in (self.start,self.end):widget.editingFinished.connect(self.input_changed)
         self.count=QSpinBox();self.count.setRange(1,500);self.count.setValue(30);self.count.valueChanged.connect(self.input_changed);form.addRow('等间距电位点数',self.count)
         left.addLayout(form);self.coverage=QLabel('共同覆盖仅表示数据范围，不等于 ORR 适用区间。');self.coverage.setWordWrap(True);left.addWidget(self.coverage)
-        coverage=QPushButton('填入当前共同覆盖范围');coverage.clicked.connect(lambda:self.window.guard(self.use_coverage));left.addWidget(coverage)
+        coverage=QPushButton('填入当前共同覆盖范围');coverage.clicked.connect(lambda:self.window.guard(self.request_coverage));left.addWidget(coverage)
         self.confirmed=QCheckBox('已核对同一电极／相同条件，且物性适用 *');self.confirmed.toggled.connect(self.input_changed);left.addWidget(self.confirmed)
         label=QLabel('K–L 给出表观电子数；两路径比例是模型估算。不要按 n 是否落入 2–4 选择区间。');label.setWordWrap(True);left.addWidget(label)
 
@@ -128,11 +130,6 @@ class AnalysisPane(QWidget):
         if self.kind=='rrde':self.seed_efficiency()
         if reset or (self.last_revision is not None and self.last_revision!=self.w.state.revision):self.clear_view()
         self.loading=False;self.update_buttons();self.refresh_exports()
-        if self.kind=='kl' and not self.start.text().strip() and not self.end.text().strip() and 'start' not in options and 'end' not in options and self.selected() and not self.w.has_draft():
-            try:
-                self.loading=True;self.use_coverage()
-            except (DataError,ValueError,TypeError) as exc:self.coverage.setText(str(exc))
-            finally:self.loading=False
 
     def seed_inputs(self,options):
         if self.kind=='kl':
@@ -189,6 +186,7 @@ class AnalysisPane(QWidget):
 
     def input_changed(self,*_):
         if self.loading:return
+        self.window.touch_ui()
         clear_result(self.w,self.kind);self.clear_view();self.note.setText('分析输入已修改，请重新计算。');self.refresh_exports()
 
     def scheme_changed(self,*_):
@@ -235,12 +233,15 @@ class AnalysisPane(QWidget):
 
     def display_changed(self,*_):
         if self.loading:return
+        self.window.touch_ui()
         try:
             self.window_points.setEnabled(self.strength.currentText()=='自定义')
             self.smooth_body.setVisible(self.smooth.isChecked());self.smooth_form.setRowVisible(self.window_points,self.strength.currentText()=='自定义')
             self.w.state.settings[self.settings_key()]=self.curve_options()
             self.w.state.settings['plot_channel']=self.channel.currentData()
             channel=self.channel.currentData();self.w.clear_polarization_exports(channel);self.clear_view()
+            if self.window.jobs.busy:
+                self.note.setText('设置已修改；当前后台结果将被核对，任务结束后请重新生成。');return
             if self.selected():
                 result=calculate_curves(self.w,self.selected(),channel,commit=False);self.present_curve(result)
                 self.note.setText('显示预览；保存绘图 CSV 会使用当前显示并重新校验。'+self.curve_notes(result))
@@ -319,6 +320,7 @@ class AnalysisPane(QWidget):
         rows.extend(result['errors']);table_from_rows(self.table,rows)
 
     def install_figures(self,figures):
+        self._needs_blank=False
         self.figures=figures;self.figure_choice.blockSignals(True);self.figure_choice.clear()
         for name in figures:self.figure_choice.addItem(FIGURE_LABELS.get(name,name),name)
         self.figure_choice.blockSignals(False)
@@ -330,6 +332,8 @@ class AnalysisPane(QWidget):
 
     def clear_view(self):
         self.saved=None;self.figures={};self.figure_choice.clear();self.table.setRowCount(0)
+        if getattr(self.window,'jobs',None) and self.window.jobs.busy:
+            self._needs_blank=True;self.canvas.hide();return
         figure=new_figure();self.canvas.figure=figure;figure.set_canvas(self.canvas);self.canvas.draw()
 
     def change_fit(self,*_):
@@ -341,6 +345,8 @@ class AnalysisPane(QWidget):
         label={'curves':'生成极化曲线','kl':'计算 K–L','rrde':'计算 RRDE'}[self.kind]
         self.calculate_button.setText(('应用并'+label if self.w.has_draft() else label))
         self.csv_button.setText('应用并导出绘图 CSV' if self.w.has_draft() else '保存绘图 CSV')
+        busy=self.window.jobs.busy
+        for button in (self.calculate_button,self.csv_button,self.png_button,self.extra_button):button.setEnabled(not busy)
         if self.kind=='kl':
             custom=self.scheme.currentData()=='custom'
             for widget in self.constants.values():widget.setEnabled(custom);self.kl_form.setRowVisible(widget,custom)
@@ -372,3 +378,77 @@ class AnalysisPane(QWidget):
             if ident in pane.model.ids:pane.table.selectionModel().select(pane.model.index(pane.model.ids.index(ident),0),QItemSelectionModel.SelectionFlag.Select|QItemSelectionModel.SelectionFlag.Rows)
         if self.selected():self.window.source.setCurrentIndex(self.window.source.findData(self.selected()[0]))
         pane.update_targets()
+
+    def task_inputs(self):
+        if self.kind=='curves':return json_bytes({'selected':self.selected(),'channel':self.channel.currentData(),'options':self.curve_options()})
+        if self.kind=='rrde':return json_bytes({'selected':self.selected(),'efficiency_text':self.efficiency.text()})
+        return json_bytes(dict(selected=self.selected(),scheme=self.scheme.currentData(),constants={k:w.text() for k,w in self.constants.items()},
+            source=self.source.text(),start=self.start.text(),end=self.end.text(),count=self.count.value(),confirmed=self.confirmed.isChecked()))
+
+    def request_calculate(self,*,target=None,asset=None):
+        self.window.ensure_idle()
+        if self.kind=='curves':self.w.clear_polarization_exports(self.channel.currentData())
+        else:clear_result(self.w,self.kind)
+        self.clear_view()
+        if self.kind=='curves':payload=dict(selected=self.selected(),channel=self.channel.currentData(),plot_key=self.settings_key(),options=self.curve_options())
+        elif self.kind=='kl':payload={'inputs':self.kl_inputs()}
+        else:payload={'selected':self.selected()}
+        if target:payload.update(target=str(target),asset=asset)
+        token=self.task_inputs();self.note.setText('正在准备后台计算…')
+        return self.window.start_task(self.kind,payload,pane=self,input_token=token,current_inputs=self.task_inputs)
+
+    def request_export(self,name,*,recompute=False,path=None):
+        from PySide6.QtWidgets import QFileDialog
+        self.window.ensure_idle()
+        if not name:raise DataError('请先生成相应结果。')
+        if path is None:path,_=QFileDialog.getSaveFileName(self,'保存分析结果',name)
+        if not path:return
+        if recompute or self.w.has_draft() or name not in self.w.state.exports:return self.request_calculate(target=path,asset=name)
+        return self.window.start_task('asset',{'asset':name,'target':str(path)},pane=self,input_token=self.task_inputs(),current_inputs=self.task_inputs)
+
+    def request_csv(self,path=None):
+        name=('ring_current_plot.csv' if self.channel.currentData()=='ring' else 'polarization_plot.csv') if self.kind=='curves' else self.kind+'_plot.csv'
+        return self.request_export(name,recompute=True,path=path)
+
+    def request_png(self,path=None):
+        name=self.figure_choice.currentData()
+        if not name:name=('ring_current' if self.channel.currentData()=='ring' else 'polarization') if self.kind=='curves' else 'kl_electron_number' if self.kind=='kl' else 'rrde_selectivity'
+        return self.request_export(name+'.png',path=path)
+
+    def request_extra(self,path=None):return self.request_export(self.extra.currentText(),path=path)
+
+    def request_fit(self,*_):
+        if self.loading or not self.saved or self.kind!='kl' or self.fit_potential.currentData() is None:return
+        if self.window.jobs.busy:self.window.touch_ui();return
+        potential=float(self.fit_potential.currentData())
+        return self.window.start_task('fit',{'potential':potential},pane=self,input_token=potential,current_inputs=lambda:float(self.fit_potential.currentData()))
+
+    def request_coverage(self):
+        self.window.ensure_idle();self.input_changed()
+        return self.window.start_task('coverage',{'selected':self.selected()},pane=self,input_token=self.task_inputs(),current_inputs=self.task_inputs)
+
+    def accept_delivery(self,delivery):
+        result=delivery['result'];operation=delivery['operation'];figures=delivery['figures']
+        self.last_revision=self.w.state.revision
+        if operation=='coverage':
+            self.start.setText(str(result['start']));self.end.setText(str(result['end']))
+            self.coverage.setText(f"共同覆盖 {result['start']:.5f} ～ {result['end']:.5f} V；仍须核对 ORR 适用区间。")
+            self.note.setText('共同覆盖已更新，未进行科学拟合。')
+        elif operation=='curves':
+            result=dict(result,figure=next(iter(figures.values())));self.present_curve(result)
+            self.note.setText(f"已生成 {len(result['outputs'])} 条曲线。"+self.curve_notes(result))
+        elif operation=='fit':
+            self.figures.update(figures);self.show_figure('kl_fit');self.note.setText('拟合图与参数已更新。')
+        else:
+            self.saved=result;self.install_figures(figures);table_from_rows(self.table,result['data'].to_dict('records')+result.get('errors',[]));self.note.setText(self.result_notes(result))
+            if operation=='kl':
+                self.loading=True;self.fit_potential.clear()
+                if not result['points'].empty:
+                    for potential in sorted(result['points'].E_V.unique()):self.fit_potential.addItem(f'{potential:.5f} V',float(potential))
+                    self.fit_potential.setCurrentIndex(max(self.fit_potential.findData(self.w.state.settings.get('kl_plot',{}).get('fit_potential')),0))
+                self.loading=False
+
+    def finish_graph_state(self):
+        if self._needs_blank:
+            self._needs_blank=False;figure=new_figure();self.canvas.figure=figure;figure.set_canvas(self.canvas);self.canvas.draw()
+        self.canvas.show()
