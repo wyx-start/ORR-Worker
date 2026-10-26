@@ -40,15 +40,9 @@ with st.expander("继续上次的分析项目"):
     project = st.file_uploader("载入 .orrproj 项目", type=["orrproj"], key="restore_project")
     if st.button("载入项目（替换当前工作区）", disabled=project is None):
         try:
-            traces, configs, settings = unpack_project(project.getvalue())
-            st.session_state.traces = traces
-            st.session_state.configs = configs
-            st.session_state.settings = settings
-            st.session_state.common_defaults = {}
-            st.session_state.import_errors = []
+            from application.workspace import Workspace
+            Workspace(st.session_state).restore_project(project.getvalue(), discard=True)
             st.session_state.project_restore_notice = True
-            st.session_state.workspace_epoch += 1
-            invalidate()
             st.rerun()
         except DataError as exc:
             st.error(str(exc))

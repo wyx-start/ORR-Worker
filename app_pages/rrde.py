@@ -63,44 +63,8 @@ if saved and (saved.get("input_signature") != signature or saved.get("revision")
 
 
 def compute_current():
-    clear_rrde()
-    require_number(floor, "最小盘电流幅值（A）", positive=True)
-    candidate_configs, candidate_settings = pending_candidate()
-    processed, failures = process_selected(selected, configs=candidate_configs, settings=candidate_settings)
-    results, chosen = {}, {}
-    for ident, output in processed.items():
-        try:
-            results[ident] = rrde_calculate(output, output["config"], floor)
-            chosen[ident] = output
-        except (DataError, ValueError, TypeError, IndexError) as exc:
-            failures.append({"文件": output["name"], "原因": str(exc)})
-    if not results:
-        detail = "；".join(f"{row['文件']}：{row['原因']}" for row in failures)
-        raise DataError("选中文件没有可计算的 RRDE 结果。"+detail)
-    frames = []
-    for ident, frame in results.items():
-        export = frame.copy()
-        export.insert(0, "file_id", ident)
-        export.insert(1, "filename", chosen[ident]["name"])
-        export.insert(2, "potential_axis", chosen[ident]["axis"])
-        export.insert(3, "rpm", chosen[ident]["config"].get("rpm"))
-        export.insert(4, "rpm_source", chosen[ident]["config"].get("rpm_source"))
-        frames.append(export)
-    merged = pd.concat(frames, ignore_index=True)
-    used = deepcopy(candidate_settings.get("rrde", {}))
-    used.update(current_inputs)
-    used["axis"] = candidate_settings.get("axis", "RHE")
-    wide = rrde_plot_table(results, chosen)
-    apply_pending_settings()
-    st.session_state.settings["rrde"] = deepcopy(used)
-    params = parameter_record(st.session_state.traces, st.session_state.configs,
-                               st.session_state.settings, chosen)
-    saved_result = dict(data=merged, frames=results, outputs=chosen, selected=list(selected),
-                        params=params, inputs=used, errors=failures, plot=wide,
-                        revision=st.session_state.revision, input_signature=signature)
-    st.session_state.results["rrde"] = saved_result
-    store_table("rrde_results.csv", merged)
-    return saved_result
+    from application.workspace import Workspace
+    return Workspace(st.session_state).calculate_rrde(selected)
 
 
 if st.button("应用并计算 RRDE" if has_draft() else "计算 RRDE", type="primary", key=f"rrde_calculate_{workspace}"):

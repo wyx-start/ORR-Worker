@@ -48,8 +48,8 @@ with st.expander("更多导出：图片、完整结果、参数与结果包"):
 st.subheader("保存可继续编辑的项目")
 if st.button("应用并保存项目" if has_draft() else "保存分析项目",key="save_project"):
     try:
-        apply_pending_settings()
-        project = pack_project(st.session_state.traces,st.session_state.configs,st.session_state.settings)
+        from application.workspace import Workspace
+        project = Workspace(st.session_state).project_bytes()
         send_download(project,"ORR_Worker_analysis.orrproj","application/zip")
         st.success("项目已生成，包含原始数据和已应用设置。缺项／冲突记录可保存，恢复后仍需解决才能分析。")
     except (DataError,ValueError,TypeError) as exc:

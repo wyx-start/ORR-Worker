@@ -23,6 +23,8 @@ def main():
              "--hidden-import","matplotlib.backends.backend_svg",
              "--hidden-import","matplotlib.backends.backend_agg",
              "--add-data",str(ROOT/"app_pages")+":app_pages",
+             "--add-data",str(ROOT/"application")+":application",
+             "--collect-submodules","application",
              "--add-data",str(examples)+":examples"]
     for module in ("IPython","notebook","pytest","_pytest","streamlit.testing","PySide6","PyQt6","PyQt5","PySide2",
                    "torch","torchvision","torchaudio","tensorflow","jax","jaxlib","transformers","cv2",

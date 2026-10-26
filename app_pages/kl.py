@@ -144,46 +144,8 @@ if saved and (saved.get("input_signature") != signature or saved.get("revision")
 
 
 def compute_current():
-    clear_kl()
-    candidate_configs, candidate_settings = pending_candidate()
-    if not confirmed:
-        raise DataError("请先核对实验条件和物性参数。")
-    chosen, failures = process_selected(selected, configs=candidate_configs, settings=candidate_settings,
-                                        channels="disk")
-    if failures or len(chosen) != len(selected):
-        detail = "；".join(f"{row['文件']}：{row['原因']}" for row in failures)
-        raise DataError("K–L 必须使用全部选中文件，不能跳过某个转速。"+detail)
-    actual_low = max(float(o["data"].E_V.min()) for o in chosen.values())
-    actual_high = min(float(o["data"].E_V.max()) for o in chosen.values())
-    if actual_low >= actual_high:
-        raise DataError("这些曲线没有共同电位区间。")
-    if start is None or end is None or not np.isfinite([start, end]).all():
-        raise DataError("请填写有限的分析起点和终点。")
-    if start > end or start < actual_low-1e-9 or end > actual_high+1e-9:
-        raise DataError("分析区间应位于全部选中文件的共同覆盖范围内，且起点不能大于终点。")
-    if isinstance(count, bool) or int(count) != count or not 1 <= count <= 500:
-        raise DataError("分析点数应为 1–500 的整数。")
-    if count > 1 and start == end:
-        raise DataError("分析单个电位请把点数设为 1。")
-    if use_preset and any(o["config"].get("temperature_C") is None or
-                          abs(float(o["config"]["temperature_C"])-25.) > 1e-8 for o in chosen.values()):
-        raise DataError("所选文献方案仅限 25 °C，请修正实验温度或选择自定义物性参数。")
-    potentials = np.linspace(start, end, int(count)) if count > 1 else np.array([start])
-    result, points = kl_calculate(list(chosen.values()), potentials, C, D, nu)
-    used = deepcopy(candidate_settings.get("kl", {}))
-    used.update({key: value for key, value in current_inputs.items() if key != "confirmed"})
-    used.update(axis=candidate_settings.get("axis", "RHE"),
-        units={"C": "mol/cm³", "D": "cm²/s", "nu": "cm²/s", "current_density": "A/cm²",
-               "rotation_input": "rpm", "rotation_fit": "rad/s"},
-        condition=KOH_PRESET["electrolyte"] if use_preset else "用户自定义")
-    apply_pending_settings()
-    st.session_state.settings["kl"] = deepcopy(used)
-    saved_result = dict(data=result, points=points, selected=list(selected), params=used,
-                        outputs=chosen, revision=st.session_state.revision, input_signature=signature)
-    st.session_state.results["kl"] = saved_result
-    store_table("kl_results.csv", result)
-    store_table("kl_fit_points.csv", points)
-    return saved_result
+    from application.workspace import Workspace
+    return Workspace(st.session_state).calculate_kl(current_inputs)
 
 
 if st.button("应用并计算 K–L" if has_draft() else "计算 K–L", type="primary", key=f"kl_calculate_{workspace}"):

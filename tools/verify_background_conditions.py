@@ -55,7 +55,7 @@ def main():
     for path in ROOT.iterdir():
         if path.is_file() and (path.suffix in (".py", ".cmd", ".md") or path.name == "requirements.txt"):
             shutil.copy2(path, isolation / path.name)
-    for folder in ("tests", "app_pages", ".streamlit", "tools"):
+    for folder in ("tests", "app_pages", ".streamlit", "tools", "application", "desktop"):
         for source in (ROOT / folder).rglob("*"):
             if folder == ".streamlit" and source.name != "config.toml":
                 continue
