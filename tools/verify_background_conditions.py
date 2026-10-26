@@ -59,7 +59,7 @@ def main():
         for source in (ROOT / folder).rglob("*"):
             if folder == ".streamlit" and source.name != "config.toml":
                 continue
-            if source.is_file() and source.suffix in (".py", ".cjs", ".toml"):
+            if source.is_file() and source.suffix in (".py", ".cjs", ".toml", ".json"):
                 target = isolation / source.relative_to(ROOT)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
