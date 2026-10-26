@@ -1,6 +1,7 @@
 """Build the browser edition with generated examples; no user files included."""
 from pathlib import Path
 import argparse
+import os
 import subprocess
 import sys
 
@@ -33,7 +34,11 @@ def main():
     for source in ROOT.glob("*.py"):
         command += ["--hidden-import",source.stem,"--add-data",str(source)+":."]
     command += [str(ROOT/"packaging"/"windows"/"browser_entry.py")]
-    subprocess.run(command,cwd=ROOT,check=True)
+    env=dict(os.environ)
+    if os.name=='nt':
+        windir=Path(os.environ['WINDIR'])
+        env['PATH']=os.pathsep.join(map(str,(Path(sys.executable).parent,windir/'System32',windir)))
+    subprocess.run(command,cwd=ROOT,env=env,check=True)
     print(output/"dist"/"ORR Worker Browser"/"ORR Worker Browser.exe")
 
 
