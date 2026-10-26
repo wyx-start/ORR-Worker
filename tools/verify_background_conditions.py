@@ -55,11 +55,11 @@ def main():
     for path in ROOT.iterdir():
         if path.is_file() and (path.suffix in (".py", ".cmd", ".md") or path.name == "requirements.txt"):
             shutil.copy2(path, isolation / path.name)
-    for folder in ("tests", "app_pages", ".streamlit", "tools", "application", "desktop"):
+    for folder in ("tests", "app_pages", ".streamlit", "tools", "application", "desktop", "assets"):
         for source in (ROOT / folder).rglob("*"):
             if folder == ".streamlit" and source.name != "config.toml":
                 continue
-            if source.is_file() and source.suffix in (".py", ".cjs", ".toml", ".json"):
+            if source.is_file() and source.suffix in (".py", ".cjs", ".toml", ".json", ".svg"):
                 target = isolation / source.relative_to(ROOT)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)

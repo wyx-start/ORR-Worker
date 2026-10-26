@@ -1,16 +1,22 @@
 # ORR Worker
 
-**源码版本：1.7.0-dev** · 稳定版：1.6.0 · Windows 本地运行 · Streamlit 前端 · CHI760F 文本数据
+**源码版本：1.7.0-dev** · 稳定版历史：1.6.0 · Windows x64 原生桌面候选版／浏览器兼容版 · CHI760F 文本数据
 
-当前开发工作区为 **1.7.0-dev**：已集成背景整组条件继承与独立记录保护，支持批量扫描／背景设置、空转速人工填写及 RRDE 默认 N=0.369；四个重复或低频区块已移除。实施与验证见 [本轮记录](docs/VALIDATION_1.7.0_DEV.md)。开发版保存的 schema=2 项目需新版本读取，1.6.0 会明确拒绝打开。
+当前 **1.7.0-dev** 已完成原生桌面改写：双击 exe 进入本机窗口，支持批量设置、全部 ORR 分析、Origin CSV、后台任务、取消与原子保存。沿用原科学核心和 schema=2 项目，继续读取 schema=1／2；1.6.0 会拒绝打开 schema=2。
 
 ORR Worker 用于批量处理氧还原反应数据：从 CV 选择单向扫描段、绘制极化曲线，并进行多转速 K–L 和 RRDE 分析。安装完成后可双击启动，不需要编写 Python。按每批 10 个文件验证，数据在本机处理。
 
 仓库地址：[wyx-start/ORR-Worker](https://github.com/wyx-start/ORR-Worker)。
 
-桌面改写已按阶段启动：[进度与验收](docs/migration/STAGE_LOG.md)。M1 浏览器版 exe 已通过本机冻结程序测试，[构建说明](docs/migration/M1_BROWSER_EXE.md)。M3 原生桌面最小流程也已通过真实 exe 本机验收，[试用范围与构建说明](docs/migration/M3_NATIVE_MINIMUM.md)；完整批量设置与分析继续迁移。用户当前无干净测试机，跨机器无 Python 验收尚未完成。
+M0—M7 按阶段验收并同步源码，见 [阶段记录](docs/migration/STAGE_LOG.md) 和 [最终本机验收](docs/migration/M7_LOCAL_RELEASE.md)。用户目前没有干净测试机，本轮仅作本机候选版验收，未声称通过全新无 Python 系统认证。
 
-桌面源码已完成 [M4 设置与批量](docs/migration/M4_NATIVE_SETTINGS.md)、[M5 全部分析与导出](docs/migration/M5_NATIVE_ANALYSIS.md)、[M6 后台任务和保存退出](docs/migration/M6_JOBS_AND_SAVING.md)。M3 试用包仍对应当阶段功能；完整候选发行包与最终文档在 M7 构建。
+## 原生候选包运行
+
+完整候选包解压后，双击 **ORR Worker/ORR Worker.exe**；保留整个目录和 `_internal`，不用安装 Python，也不启动浏览器服务。关闭时可保存项目、放弃或取消；保存失败保留窗口。
+
+候选包由构建器生成在 `.release/M7/`，包含 ZIP、校验值、许可证和指南。**GitHub 的 Code → Download ZIP 是源码，不含这个二进制运行包**；本轮未创建正式 GitHub Release。开发者构建见 [Windows 构建说明](docs/BUILD_WINDOWS.md)。
+
+使用步骤见 [原生桌面指南](docs/NATIVE_USER_GUIDE.md)，后续开发见 [桌面架构](docs/NATIVE_ARCHITECTURE.md)。原浏览器入口继续保留，可用于对照与回退。
 
 ## 功能
 
@@ -27,7 +33,7 @@ ORR Worker 用于批量处理氧还原反应数据：从 CV 选择单向扫描�
 | 条件简化 | 共享草稿、统一应用、明确批量范围；应用并计算／导出／保存；按用途显示必填项 |
 | 导出 | Origin 绘图 CSV 优先、独立 XY 列组；完整 CSV、PNG 300 dpi、SVG、参数 JSON、ZIP、`.orrproj` |
 
-## 下载与安装
+## 浏览器兼容版：源码安装
 
 验证环境：Windows、Python **3.13.7**、Streamlit **1.61.0**。其余依赖固定在 [requirements.txt](requirements.txt)；尚未验证其他 Python 主次版本。
 
@@ -46,9 +52,9 @@ ORR Worker 用于批量处理氧还原反应数据：从 CV 选择单向扫描�
    .\.venv\Scripts\python.exe -m pip install -r requirements.txt
    ```
 
-不需要激活虚拟环境，也不需要修改 PowerShell 执行策略。项目不包含 Python 安装程序或免安装 EXE。
+不需要激活虚拟环境，也不需要修改 PowerShell 执行策略。这些安装步骤只适用于浏览器源码版；原生候选运行包自带环境。
 
-## 启动与关闭
+## 浏览器兼容版：启动与关闭
 
 双击 **启动 ORR.cmd**，浏览器会自动打开。脚本优先使用项目 `.venv`，未创建时使用 Python Launcher 的 3.13 环境。再次启动会复用已有服务。
 
@@ -62,7 +68,7 @@ ORR Worker 用于批量处理氧还原反应数据：从 CV 选择单向扫描�
 
 服务仅监听 `127.0.0.1`，通常打开 `http://127.0.0.1:8765/orr-workbench/`；端口被占用时会从 8765–8794 选择其他端口。以自动打开的地址或 `.runtime/server.json` 为准。启动日志位于 `.runtime/server.log`。
 
-## 第一次处理数据
+## 浏览器兼容版：第一次处理数据
 
 1. 在「导入与设置」拖入 TXT，点击导入；也可点击“载入四份示例”体验流程。
 2. 核对样品名称、分组、转速、文件用途和背景。修改先进入草稿；支持文件名中的 `1600转`、`1600rpm`、`RPM1600`、`转速=1600`，识别来源仍须核对。
@@ -185,13 +191,13 @@ K–L 可选择整套已有文献参数，也可自定义；不会从不明确�
 
 ## 开发与验证
 
-应用计算在 `orr_core.py`，Streamlit 页面在 `app_pages/`。启动器仅监听 `127.0.0.1`，禁用使用统计。
+计算在 `orr_core.py`，共享服务在 `application/`，原生界面在 `desktop/`；浏览器页面在 `app_pages/`。原生版不启动本机 Web 服务，浏览器启动器仍仅监听 `127.0.0.1`。
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-当前 1.7.0-dev 已通过 **277 项隔离回归及 4 组真实浏览器流程**，涵盖空转速连续手填、10 文件批量配对、旧值保留与项目往返，见 [开发版验证](docs/VALIDATION_1.7.0_DEV.md)。
+最终检查数量、实际 exe 的三种渲染流程、重复启动和环境边界见 [M7 验收](docs/migration/M7_LOCAL_RELEASE.md)。迁移前 277 项及 4 组浏览器基线仍保留，见 [原开发版记录](docs/VALIDATION_1.7.0_DEV.md)。
 
 1.6.0 的 157 项完整回归已通过，真实浏览器核对了首击下载、项目恢复、平滑／单位、K–L 已知答案及 RRDE 缺口。详见 [本版验证记录](docs/VALIDATION_1.6.0.md) 和 [审查记录](docs/REVIEW_1.6.0.md)。原有自动测试继续覆盖解析、扫描边界、背景、独立正确答案公式、转速识别、项目恢复、条件显隐、默认面积、背景 pH、环通道依赖隔离、配对绑定及环图比较。独立包使用合成示例完成完整回归；浏览器验证脚本在 `tests/browser_*.cjs`，使用 Playwright，属于可选开发工具，不是日常运行依赖。
 
@@ -200,6 +206,11 @@ K–L 可选择整套已有文献参数，也可自定义；不会从不明确�
 ## 项目结构
 
 ```text
+application/              共享工作区、编辑事务、分析、图形、快照与文件发布
+desktop/                  原生窗口、表格、设置、分析、后台任务和退出策略
+packaging/windows/        固定构建、Qt 收集钩子、许可与目录式发行
+requirements/             核心／浏览器／桌面依赖与原生构建闭包
+assets/                   程序图标
 streamlit_app.py          页面导航与全局设置
 orr_core.py               数据解析、扫描提取和科学计算
 experiment_conditions.py  条件校验与常用预设存取

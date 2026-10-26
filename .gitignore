@@ -5,6 +5,8 @@ __pycache__/
 verification/
 user_settings/
 .venv/
+.venv-native/
+.venv-browser/
 .release/
 .env
 .env.*

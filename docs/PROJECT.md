@@ -2,11 +2,13 @@
 
 已发布版本：1.6.0；当前开发工作区：1.7.0-dev。首次交付：2026-10-14；1.5.0 环图与配对背景于 2026-10-18 实现、2026-10-19 复核。1.6.0 完成统一设置草稿、组合操作和 Origin 绘图 CSV。本文件供后续开发者或 Codex 会话继续改进。
 
+2026-10-27 补充：已按 M0—M7 迁移为 PySide6 原生桌面候选版，复用共享服务与原计算核心。当前架构以 [NATIVE_ARCHITECTURE.md](NATIVE_ARCHITECTURE.md) 为准，构建见 [BUILD_WINDOWS.md](BUILD_WINDOWS.md)，验收见 [M7](migration/M7_LOCAL_RELEASE.md)。下文浏览器路径和历史版本说明继续保留，不能据此删掉原生层或重新引入已移除的控件。
+
 Qoder 的两个 UI 文件及三个新测试已集成；Codex 独立复核了 247 项交付基线，并落实 RRDE 默认值、界面精简、批量扫描／背景与转速人工修正。设计见 [任务文档](tasks/SIMPLIFY_RRDE_AND_BATCH_SCAN_BACKGROUND.md)，最终覆盖与限制见 [验证记录](VALIDATION_1.7.0_DEV.md)。本轮由 Codex 统一修改并验收，未向外部代理发送消息。
 
 ## 1. 已确认的需求与边界
 
-本机 Windows 使用，依赖本机已安装 Python；双击启动后打开浏览器。不要求免安装运行环境或部署服务器。按每批 10 个文件做验证。
+当前本机 Windows 原生候选目录包自带运行环境，双击 exe 进入窗口；浏览器兼容入口保留。按每批 10 个文件验证，不增加云端账户、联网安装、自动更新或服务器部署。用户没有干净测试机，本轮只完成本机验收；其他系统不宣称通过。
 
 第一版专做 ORR，支持辰华 CHI760F 的文本导出、批量导入、CV 单向支线提取、独立背景、多转速 K–L、RRDE、pH/参比影响、电流密度、PNG/SVG/CSV/JSON 分别导出以及项目保存恢复。
 
@@ -37,6 +39,8 @@ Qoder 的两个 UI 文件及三个新测试已集成；Codex 独立复核了 247
 | 项目 | `.orrproj` ZIP 中包含原始文件、配置和设置，不使用 pickle |
 
 ## 2. 启动与开发环境
+
+原生环境使用 requirements/desktop.txt；固定发行构建使用 requirements/native-build-lock.txt 的独立环境。以下启动器说明属于浏览器兼容入口。
 
 入口：`启动 ORR.cmd`、`停止 ORR.cmd`。两者优先调用项目虚拟环境：
 

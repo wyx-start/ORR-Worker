@@ -1,0 +1,27 @@
+# Native Windows build closure; Python 3.13.7; validated package versions.
+altgraph==0.17.5
+contourpy==1.3.3
+cycler==0.12.1
+fonttools==4.62.1
+kiwisolver==1.5.0
+matplotlib==3.10.8
+numpy==2.3.4
+packaging==26.1
+pandas==3.0.5
+pefile==2024.8.26
+pillow==12.3.0
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.9
+pyparsing==3.3.2
+PySide6==6.12.0
+PySide6_Addons==6.12.0
+PySide6_Essentials==6.12.0
+PySide6_Pdf==6.12.0.140
+PySide6_WebEngine==6.12.0.140
+python-dateutil==2.9.0.post0
+pywin32-ctypes==0.2.3
+scipy==1.17.1
+setuptools==80.9.0
+shiboken6==6.12.0
+six==1.17.0
+tzdata==2026.3

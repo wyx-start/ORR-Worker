@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTabWidget, QPushButton, QLabel, QComboBox, QLineEdit, QTableWidget, QTableWidgetItem,
-    QFileDialog, QMessageBox, QSplitter, QHeaderView)
+    QFileDialog, QMessageBox, QSplitter, QHeaderView, QApplication)
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 
 from application.workspace import Workspace
@@ -30,7 +30,10 @@ class MainWindow(DesktopLifecycle,QMainWindow):
         self.loading = False
         self.force_close = False
         self.setWindowTitle("ORR Worker · 桌面版预览")
-        self.resize(1220, 850)
+        screen=QApplication.primaryScreen()
+        available=screen.availableGeometry() if screen else None
+        self.resize(min(1220,max(700,available.width()-40)) if available else 1220,
+                    min(850,max(500,available.height()-80)) if available else 850)
         self.setAcceptDrops(True)
         self.tabs = QTabWidget();self.setCentralWidget(self.tabs)
         from desktop.settings import SettingsPane

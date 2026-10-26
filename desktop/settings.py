@@ -91,7 +91,7 @@ class SettingsPane(QWidget):
         self.binding=combo([('盘环配对','paired'),('分别指定','independent')]);self.disk_bg=QComboBox();self.ring_bg=QComboBox()
         for widget in (self.binding,self.disk_bg,self.ring_bg):widget.currentIndexChanged.connect(self.stage_binding)
         scanform.addRow('背景绑定方式',self.binding);scanform.addRow('盘背景',self.disk_bg);scanform.addRow('环背景',self.ring_bg);sf.addLayout(scanform)
-        self.scan_canvas=FigureCanvasQTAgg(new_figure(7,2.4));sf.addWidget(self.scan_canvas)
+        self.scan_canvas=FigureCanvasQTAgg(new_figure(7,2.4));self.scan_canvas.setMinimumHeight(180);sf.addWidget(self.scan_canvas)
         self.segments_table=QTableWidget();self.segments_table.setMaximumHeight(125);sf.addWidget(self.segments_table)
         advanced=QGroupBox('高级：通道、符号、iR 与环检测');advanced.setCheckable(True);advanced.setChecked(False)
         af=QFormLayout(advanced);self.advanced_body=QWidget();ab=QFormLayout(self.advanced_body);af.addRow(self.advanced_body)

@@ -1,0 +1,192 @@
+{
+  "stage": "M7",
+  "version": "1.7.0-dev",
+  "edition": "native-local-candidate",
+  "recorded_utc": "2026-10-26T18:15:40.813056+00:00",
+  "regression": {
+    "tests_run": 347,
+    "successful": true,
+    "duration_seconds": 68.594487
+  },
+  "native_checks": {
+    "tests_run": 68,
+    "successful": true,
+    "duration_seconds": 24.228596
+  },
+  "browser_checks": [
+    {
+      "script": "browser_conditions.cjs",
+      "passed": true
+    },
+    {
+      "script": "browser_background_conditions.cjs",
+      "passed": true
+    },
+    {
+      "script": "browser_background_ph.cjs",
+      "passed": true
+    },
+    {
+      "script": "browser_batch_controls.cjs",
+      "passed": true
+    }
+  ],
+  "frozen_cases": [
+    {
+      "name": "scale1",
+      "passed": true,
+      "full_workflow": true,
+      "files": 10,
+      "invalid_file_isolated": true,
+      "manual_rpm": true,
+      "batch_pairing": true,
+      "manual_segment": true,
+      "smoothing_display_only": true,
+      "kl_known_n": 3.2,
+      "rrde_known_n": 3.2,
+      "peroxide_pct": 40.0,
+      "invalid_rrde_preserved": true,
+      "ring_comparison": true,
+      "csv_png_svg_json_zip": true,
+      "schema1_reader": true,
+      "schema2_roundtrip": true,
+      "background_cache_and_conflict": true,
+      "cancellation": true,
+      "stale_result_discarded": true,
+      "readonly_file_checked": true,
+      "frozen": true,
+      "bundled_sys_path": true,
+      "streamlit_imported": false,
+      "platform": "Windows-11-10.0.26100-SP0",
+      "python": "3.13.7",
+      "qt_scale_factor": "1",
+      "startup_seconds": 1.4243808000028366,
+      "workflow_seconds": 7.420105200002581,
+      "window_logical_size": [
+        1150,
+        720
+      ],
+      "screenshot_device_pixel_ratio": 1.0,
+      "qt_platform": "offscreen",
+      "icon_loaded": true,
+      "exit_code": 0,
+      "total_seconds": 9.665784600001643,
+      "peak_working_set_bytes": 296488960
+    },
+    {
+      "name": "scale150",
+      "passed": true,
+      "full_workflow": true,
+      "files": 10,
+      "invalid_file_isolated": true,
+      "manual_rpm": true,
+      "batch_pairing": true,
+      "manual_segment": true,
+      "smoothing_display_only": true,
+      "kl_known_n": 3.2,
+      "rrde_known_n": 3.2,
+      "peroxide_pct": 40.0,
+      "invalid_rrde_preserved": true,
+      "ring_comparison": true,
+      "csv_png_svg_json_zip": true,
+      "schema1_reader": true,
+      "schema2_roundtrip": true,
+      "background_cache_and_conflict": true,
+      "cancellation": true,
+      "stale_result_discarded": true,
+      "readonly_file_checked": true,
+      "frozen": true,
+      "bundled_sys_path": true,
+      "streamlit_imported": false,
+      "platform": "Windows-11-10.0.26100-SP0",
+      "python": "3.13.7",
+      "qt_scale_factor": "1.5",
+      "startup_seconds": 1.1101646999995864,
+      "workflow_seconds": 7.4454163999980665,
+      "window_logical_size": [
+        1150,
+        720
+      ],
+      "screenshot_device_pixel_ratio": 1.5,
+      "qt_platform": "offscreen",
+      "icon_loaded": true,
+      "exit_code": 0,
+      "total_seconds": 8.963727599999402,
+      "peak_working_set_bytes": 310689792
+    },
+    {
+      "name": "windows",
+      "passed": true,
+      "full_workflow": true,
+      "files": 10,
+      "invalid_file_isolated": true,
+      "manual_rpm": true,
+      "batch_pairing": true,
+      "manual_segment": true,
+      "smoothing_display_only": true,
+      "kl_known_n": 3.2,
+      "rrde_known_n": 3.2,
+      "peroxide_pct": 40.0,
+      "invalid_rrde_preserved": true,
+      "ring_comparison": true,
+      "csv_png_svg_json_zip": true,
+      "schema1_reader": true,
+      "schema2_roundtrip": true,
+      "background_cache_and_conflict": true,
+      "cancellation": true,
+      "stale_result_discarded": true,
+      "readonly_file_checked": true,
+      "frozen": true,
+      "bundled_sys_path": true,
+      "streamlit_imported": false,
+      "platform": "Windows-11-10.0.26100-SP0",
+      "python": "3.13.7",
+      "qt_scale_factor": "1",
+      "startup_seconds": 1.470988099998067,
+      "workflow_seconds": 7.429619800001092,
+      "window_logical_size": [
+        1150,
+        720
+      ],
+      "screenshot_device_pixel_ratio": 1.0,
+      "qt_platform": "windows",
+      "icon_loaded": true,
+      "exit_code": 0,
+      "total_seconds": 9.345321100001456,
+      "peak_working_set_bytes": 360333312
+    }
+  ],
+  "instance": {
+    "duplicate_exit_code": 2,
+    "first_exit_code": 0,
+    "relaunch_exit_code": 0,
+    "passed": true
+  },
+  "program_unchanged": true,
+  "checksums_valid": true,
+  "source_manifest_matches": true,
+  "external_python_on_path": false,
+  "program_files_readonly": true,
+  "actual_directory_acl_readonly": false,
+  "clean_machine_tested": false,
+  "real_samples_read": false,
+  "formal_github_release_created": false,
+  "archive": {
+    "name": "ORR-Worker-1.7.0-dev-Windows-x64.zip",
+    "bytes": 106095277,
+    "sha256": "5f2cdd47a434c2a1e8acaa819c4728a7c0fe5a917e92278f9e79cf39640ae4b4"
+  },
+  "bundle": {
+    "files": 1245,
+    "bytes": 252974264,
+    "source_digest": "390e335ff301b22ea7996a8303d18cfab5c2215e899ef7fc1866c734db146a0d",
+    "source_digest_format": "utf8-lf-sha256"
+  },
+  "performance_scope": "Generated batch of 9 samples plus 1 background, 26 raw points per file; startup_seconds measures application window initialization, not full cold boot.",
+  "pending": [
+    "Clean Windows without installed Python",
+    "Physical monitor scaling and manual interaction",
+    "Other Windows versions",
+    "Directory ACL read-only installation"
+  ]
+}
