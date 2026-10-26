@@ -8,6 +8,8 @@ ORR Worker 用于批量处理氧还原反应数据：从 CV 选择单向扫描�
 
 仓库地址：[wyx-start/ORR-Worker](https://github.com/wyx-start/ORR-Worker)。
 
+桌面改写已按阶段启动：[进度与验收](docs/migration/STAGE_LOG.md)。M1 浏览器版 exe 已通过本机冻结程序测试，[构建与使用说明](docs/migration/M1_BROWSER_EXE.md)；原生桌面版继续开发。用户当前无干净测试机，跨机器无 Python 验收尚未完成。
+
 ## 功能
 
 | 功能 | 支持内容 |

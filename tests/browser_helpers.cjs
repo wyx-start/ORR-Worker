@@ -54,8 +54,13 @@ async function setup(){
     await navigate('导出与项目');
     return download(page.getByRole('button',{name:/^(保存分析项目|应用并保存项目)$/}),filename);
   };
-  await page.goto(process.env.ORR_TEST_URL||'http://127.0.0.1:8766/orr-workbench/');
-  await page.getByRole('heading',{name:'导入与设置',exact:true}).waitFor(); await settle();
+  try {
+    await page.goto(process.env.ORR_TEST_URL||'http://127.0.0.1:8766/orr-workbench/');
+    await page.getByRole('heading',{name:'导入与设置',exact:true}).waitFor(); await settle();
+  } catch (error) {
+    await browser.close();
+    throw error;
+  }
   return {browser,page,errors,root,output,settle,open,choose,navigate,apply,download,parameters,restore,save};
 }
 module.exports={setup,fs,path,assert};
