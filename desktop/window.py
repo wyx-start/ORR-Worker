@@ -92,6 +92,7 @@ class MainWindow(DesktopLifecycle,QMainWindow):
 
     def update_actions(self):
         for pane in self.analyses.values():pane.update_buttons()
+        self.settings_pane.update_quick_actions()
         dirty=self.workspace.has_draft()
         self.settings_pane.project_button.setText('应用并保存分析项目' if dirty else '保存分析项目')
         for key,normal,pending in (('data','导出全部完整数据 CSV','应用并导出全部完整数据 CSV'),('parameters','导出当前配置参数 JSON','应用并导出当前配置参数 JSON'),('project','保存分析项目','应用并保存分析项目')):

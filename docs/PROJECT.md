@@ -4,6 +4,8 @@
 
 2026-10-27 补充：已按 M0—M7 迁移为 PySide6 原生桌面候选版，复用共享服务与原计算核心。当前架构以 [NATIVE_ARCHITECTURE.md](NATIVE_ARCHITECTURE.md) 为准，构建见 [BUILD_WINDOWS.md](BUILD_WINDOWS.md)，验收见 [M7](migration/M7_LOCAL_RELEASE.md)。下文浏览器路径和历史版本说明继续保留，不能据此删掉原生层或重新引入已移除的控件。
 
+2026-10-28：桌面导入页改为默认摘要与直接绘图，批量常用条件和逐文件／高级设置按需展开；当前候选包输出 `.release/simple-import/`，详见 [更新与验收](tasks/SIMPLIFY_NATIVE_IMPORT.md)。
+
 Qoder 的两个 UI 文件及三个新测试已集成；Codex 独立复核了 247 项交付基线，并落实 RRDE 默认值、界面精简、批量扫描／背景与转速人工修正。设计见 [任务文档](tasks/SIMPLIFY_RRDE_AND_BATCH_SCAN_BACKGROUND.md)，最终覆盖与限制见 [验证记录](VALIDATION_1.7.0_DEV.md)。本轮由 Codex 统一修改并验收，未向外部代理发送消息。
 
 ## 1. 已确认的需求与边界

@@ -5,7 +5,7 @@ import math
 from PySide6.QtCore import Qt,QItemSelectionModel
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QTabWidget,QScrollArea,
     QPushButton,QLabel,QLineEdit,QComboBox,QCheckBox,QTableView,QTableWidget,QTableWidgetItem,
-    QHeaderView,QAbstractItemView,QGroupBox,QSplitter,QMessageBox)
+    QHeaderView,QAbstractItemView,QGroupBox,QSplitter,QMessageBox,QMenu)
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from application.editing import condition_updates,stage_background_mode,effective_independent_values
 from application.figures import new_figure
@@ -48,22 +48,27 @@ class SettingsPane(QWidget):
     def __init__(self,window):
         super().__init__();self.window=window;self.w=window.workspace;self.loading=True
         layout=QVBoxLayout(self);actions=QHBoxLayout()
-        for text,operation in (('导入文件',window.choose_files),('打开项目',window.choose_project),('保存分析项目',window.choose_save_project),
-                               ('补全空白转速',self.fill_rpm),('移除选中文件',self.remove_selected)):
+        for text,operation in (('导入文件',window.choose_files),('打开项目',window.choose_project),('保存分析项目',window.choose_save_project)):
             button=QPushButton(text);button.clicked.connect(lambda checked=False,f=operation:window.guard(f));actions.addWidget(button)
             if text=='保存分析项目':self.project_button=button
-        actions.addStretch();layout.addLayout(actions)
+        more=QPushButton('更多');menu=QMenu(more)
+        for text,operation in (('根据文件名补全空白转速',self.fill_rpm),('移除选中文件',self.remove_selected)):
+            action=menu.addAction(text);action.triggered.connect(lambda checked=False,f=operation:window.guard(f))
+        more.setMenu(menu);actions.addWidget(more);actions.addStretch();layout.addLayout(actions)
         self.model=FileModel(self.w);self.table=QTableView();self.table.setModel(self.model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setItemDelegateForColumn(3,ChoiceDelegate(lambda:[(v,v) for v in ('样品','RRDE','背景')],self.table))
         self.table.setItemDelegateForColumn(5,ChoiceDelegate(self.background_choices,self.table))
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        for column in (1,2,6):self.table.setColumnHidden(column,True)
+        self.table.setToolTip('双击可修改用途、转速或背景；样品名、分组和点数可在“显示全部列”中查看。')
         self.table.clicked.connect(lambda index:self.source.setCurrentIndex(self.source.findData(self.model.ids[index.row()])))
         self.model.changed.connect(self.on_change);self.model.failed.connect(lambda text:self.status.setText(text))
         split=QSplitter(Qt.Orientation.Vertical);split.addWidget(self.table);layout.addWidget(split,1)
         self.import_errors=QTableWidget();self.import_errors.setMaximumHeight(110);layout.addWidget(self.import_errors)
-        lower=QWidget();ll=QVBoxLayout(lower);split.addWidget(lower);split.setSizes([230,500])
+        lower=QWidget();self.details_body=lower;ll=QVBoxLayout(lower);split.addWidget(lower);split.setSizes([300,400])
+        lower.setMinimumHeight(300);lower.hide();self.editor_split=split
         row=QHBoxLayout();row.addWidget(QLabel('读取设置'));self.source=QComboBox();row.addWidget(self.source,2)
         row.addWidget(QLabel('应用范围'));self.scope=combo(['仅此文件','当前组','全部样品','表格选中']);row.addWidget(self.scope)
         ll.addLayout(row);self.source.currentIndexChanged.connect(self.load)
@@ -125,11 +130,31 @@ class SettingsPane(QWidget):
         self.legacy=combo([('旧 pH 跟随','follow'),('旧 pH 独立','manual')]);self.legacy.currentIndexChanged.connect(self.stage_legacy)
         bl.addWidget(self.legacy);self.bg_table=QTableWidget();bl.addWidget(self.bg_table);tabs.addTab(bg,'背景实验条件')
         self.status=QLabel('拖入实验文件，核对后统一应用。');self.status.setWordWrap(True);layout.addWidget(self.status)
-        row=QHBoxLayout();self.apply_button=QPushButton('应用设置');self.apply_button.clicked.connect(lambda:window.guard(window.apply));row.addWidget(self.apply_button)
-        discard=QPushButton('放弃未应用修改');discard.clicked.connect(lambda:window.guard(window.discard));row.addWidget(discard)
-        details=QPushButton('查看草稿详情');details.clicked.connect(self.show_draft);row.addWidget(details);row.addStretch();layout.addLayout(row)
+        row=QHBoxLayout();self.details_toggle=QPushButton('逐文件／高级设置');self.details_toggle.setCheckable(True);row.addWidget(self.details_toggle)
+        self.details_toggle.toggled.connect(lower.setVisible)
+        self.all_columns=QCheckBox('显示全部列');self.all_columns.toggled.connect(self.show_columns);row.addWidget(self.all_columns)
+        self.apply_button=QPushButton('应用设置');self.apply_button.clicked.connect(lambda:window.guard(window.apply));row.addWidget(self.apply_button)
+        self.discard_button=QPushButton('放弃未应用修改');self.discard_button.clicked.connect(lambda:window.guard(window.discard));row.addWidget(self.discard_button)
+        self.draft_button=QPushButton('查看草稿详情');self.draft_button.clicked.connect(self.show_draft);row.addWidget(self.draft_button);row.addStretch()
+        self.plot_button=QPushButton('生成极化曲线');self.plot_button.clicked.connect(lambda:window.guard(self.quick.plot));row.addWidget(self.plot_button);layout.addLayout(row)
+        from desktop.quick_import import QuickImport
+        self.quick=QuickImport(self);layout.insertWidget(1,self.quick)
         self.loading=False
         self.sections.currentChanged.connect(lambda:self.update_targets())
+        self.table.selectionModel().selectionChanged.connect(lambda:self.quick.refresh() if not self.loading else None)
+
+    def show_columns(self,visible):
+        for column in (1,2,6):self.table.setColumnHidden(column,not visible)
+
+    def show_details(self,section=0):
+        self.details_toggle.setChecked(True);self.sections.setCurrentIndex(section)
+
+    def update_quick_actions(self):
+        dirty=self.w.has_draft();busy=bool(getattr(self.window,'jobs',None) and self.window.jobs.busy)
+        self.plot_button.setText('应用并生成极化曲线' if dirty else '生成极化曲线')
+        self.plot_button.setEnabled(bool(self.w.state.traces) and not busy)
+        for button in (self.apply_button,self.discard_button,self.draft_button):button.setVisible(dirty)
+        self.apply_button.setEnabled(not busy);self.discard_button.setEnabled(not busy)
 
     def add_field(self,form,field,label):
         widget=QLineEdit();widget.editingFinished.connect(lambda f=field:self.window.guard(lambda:self.stage_field(f)))
@@ -222,6 +247,7 @@ class SettingsPane(QWidget):
         else:
             for widget in self.fields.values():widget.setEnabled(False)
         self.loading=False;self.update_targets()
+        if hasattr(self,'quick'):self.quick.refresh();self.update_quick_actions()
 
     def on_change(self):
         self.load();self.window.calculate_button.setText('应用并生成极化曲线' if self.w.has_draft() else '生成极化曲线')

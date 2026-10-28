@@ -26,6 +26,7 @@ orr_core.py 与 background_*.py / settings_draft.py 等纯业务模块
 | `application/figures.py`、`data.py` | 无 Qt 的图形构建、PNG／SVG、CSV／ZIP |
 | `application/tasks.py` | 工作区快照、有效性摘要、任务执行与待发布文件 |
 | `desktop/window.py`、`models.py`、`settings.py` | 五页导航、可编辑文件表、条件与扫描／背景设置 |
+| `desktop/quick_import.py` | 默认导入摘要、按需批量 pH／参比／背景和直接后台绘图；仅主动修改字段构造补丁 |
 | `desktop/analysis.py` | 分析输入、图表、结果与 CSV 优先的保存操作 |
 | `desktop/jobs.py` | 单个后台线程、进度、协作取消、主线程接收 |
 | `desktop/lifecycle.py` | 未保存修改、项目保存／打开／关闭与替换提示 |
@@ -35,6 +36,8 @@ orr_core.py 与 background_*.py / settings_draft.py 等纯业务模块
 ## 设置的唯一来源
 
 编辑器从 `get_draft_view()` 的 `records` 构造补丁。背景有效条件、摘要和处理投影只读；写权限以字段 `editable` 为准。先预览范围，再暂存整批修改，最后统一应用或应用并执行任务。非法整批更新不能部分成功。
+
+2026-10-28 起，默认导入页收起完整编辑器，直接显示实际条件摘要。快速范围默认全部样品，排除背景；未知／不同值不补成统一默认。展开常用设置后主动修改单项进入草稿，背景绑定仍经批量构造器校验。直接绘图按钮复用原生分析任务；所有分析页的修改条件入口会展开原完整编辑器。测试 `test_quick_import.py` 覆盖真实按钮点击、原值修正及范围隔离，不能只验证同步辅助方法。
 
 `follow`、`independent`、`legacy_ph` 保持既有语义。平铺字段始终是独立记录；切换到跟随不回写派生值，也不清空独立缓存。跟随等待或冲突时不能回退缓存。显式“用当前有效条件建立独立记录”才复制条件并记录来源。共享背景关联条件冲突必须指出字段和样品。
 

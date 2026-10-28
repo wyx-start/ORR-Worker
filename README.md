@@ -10,11 +10,13 @@ ORR Worker 用于批量处理氧还原反应数据：从 CV 选择单向扫描�
 
 M0—M7 按阶段验收并同步源码，见 [阶段记录](docs/migration/STAGE_LOG.md) 和 [最终本机验收](docs/migration/M7_LOCAL_RELEASE.md)。用户目前没有干净测试机，本轮仅作本机候选版验收，未声称通过全新无 Python 系统认证。
 
+2026-10-28 导入流程进一步简化：默认只显示文件核对表和条件摘要，直接生成极化曲线；批量 pH／参比／背景按需展开，逐文件与高级设置收起。不同条件和旧空值保留，见 [导入页更新与验收](docs/tasks/SIMPLIFY_NATIVE_IMPORT.md)。
+
 ## 原生候选包运行
 
 完整候选包解压后，双击 **ORR Worker/ORR Worker.exe**；保留整个目录和 `_internal`，不用安装 Python，也不启动浏览器服务。关闭时可保存项目、放弃或取消；保存失败保留窗口。
 
-候选包由构建器生成在 `.release/M7/`，包含 ZIP、校验值、许可证和指南。**GitHub 的 Code → Download ZIP 是源码，不含这个二进制运行包**；本轮未创建正式 GitHub Release。开发者构建见 [Windows 构建说明](docs/BUILD_WINDOWS.md)。
+当前简化导入候选包位于 `.release/simple-import/`，M7 历史包保留在 `.release/M7/`。两者均包含 ZIP、校验值、许可证和指南。**GitHub 的 Code → Download ZIP 是源码，不含这个二进制运行包**；本轮未创建正式 GitHub Release。开发者构建见 [Windows 构建说明](docs/BUILD_WINDOWS.md)，可通过构建器 `--output` 指定新的输出目录。
 
 使用步骤见 [原生桌面指南](docs/NATIVE_USER_GUIDE.md)，后续开发见 [桌面架构](docs/NATIVE_ARCHITECTURE.md)。原浏览器入口继续保留，可用于对照与回退。
 

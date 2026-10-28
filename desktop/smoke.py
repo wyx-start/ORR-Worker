@@ -60,6 +60,15 @@ def verify_full(window,output):
     assert len(window.workspace.state.import_errors)==1
     w=window.workspace;p=window.settings_pane
     samples=[i for i,c in w.state.configs.items() if c['role']!='背景'];bg=next(i for i,c in w.state.configs.items() if c['role']=='背景')
+    assert p.details_body.isHidden() and p.quick.body.isHidden()
+    window.tabs.setCurrentIndex(0);window.show();QApplication.processEvents()
+    assert window.grab().save(str(output/'simple_import.png'))
+    p.plot_button.click();wait_for_idle(window.jobs)
+    assert window._last_job_state=='accepted' and 'polarization_plot.csv' in w.state.exports
+    window.tabs.setCurrentIndex(0);p.quick.toggle.click()
+    p.quick.background.setCurrentIndex(p.quick.background.findData(bg));p.quick.background.activated.emit(p.quick.background.currentIndex())
+    assert w.has_draft();p.apply_button.click();p.quick.toggle.click()
+    for ident in samples:assert w.state.configs[ident]['background_disk']==bg and w.state.configs[ident]['background_ring']==bg
     unknown=next(i for i,t in w.state.traces.items() if t.name=='Synthetic-unmarked.txt')
     assert w.state.configs[unknown]['rpm'] is None
     for ident in samples:assert w.state.configs[ident]['pH']==13 and w.state.configs[ident]['reference']=='SCE' and w.state.configs[ident]['collection_efficiency']==.369
@@ -152,7 +161,7 @@ def verify_full(window,output):
     frozen=bool(getattr(sys,'frozen',False));root=Path(sys.executable).resolve().parent
     isolated_paths=all(Path(path).resolve().is_relative_to(root) for path in sys.path) if frozen else None
     if frozen:assert isolated_paths and not any(name=='streamlit' or name.startswith('streamlit.') for name in sys.modules)
-    report=dict(passed=True,full_workflow=True,real_data_read=False,native_window=True,files=10,invalid_file_isolated=True,
+    report=dict(passed=True,full_workflow=True,simple_import=True,real_data_read=False,native_window=True,files=10,invalid_file_isolated=True,
         manual_rpm=True,batch_pairing=True,manual_segment=True,smoothing_display_only=True,kl_known_n=3.2,rrde_known_n=3.2,
         peroxide_pct=40.,invalid_rrde_preserved=True,ring_comparison=True,csv_png_svg_json_zip=True,schema1_reader=True,
         schema2_roundtrip=True,background_cache_and_conflict=True,cancellation=True,stale_result_discarded=True,

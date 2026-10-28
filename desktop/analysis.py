@@ -373,7 +373,7 @@ class AnalysisPane(QWidget):
 
     def open_conditions(self):
         self.window.tabs.setCurrentIndex(0)
-        pane=self.window.settings_pane;pane.sections.setCurrentIndex(0);pane.scope.setCurrentText('表格选中');pane.table.clearSelection()
+        pane=self.window.settings_pane;pane.show_details(0);pane.scope.setCurrentText('表格选中');pane.table.clearSelection()
         for ident in self.selected():
             if ident in pane.model.ids:pane.table.selectionModel().select(pane.model.index(pane.model.ids.index(ident),0),QItemSelectionModel.SelectionFlag.Select|QItemSelectionModel.SelectionFlag.Rows)
         if self.selected():self.window.source.setCurrentIndex(self.window.source.findData(self.selected()[0]))
