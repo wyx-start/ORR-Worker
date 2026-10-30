@@ -158,10 +158,31 @@ def verify_full(window,output):
             assert readonly.read_bytes()==b'original' and window._last_job_state=='failed'
             readonly_checked=True
         finally:readonly.chmod(stat.S_IREAD|stat.S_IWRITE)
+    # A separate analytic wave exercises useful onset/half-wave answers in the
+    # actual runtime; the ten-file fixture above is deliberately not sigmoid.
+    from application.workspace import Workspace
+    e=np.r_[np.linspace(0,1.2,61),np.linspace(1.18,0,60)]
+    current=np.where(e>=1.,0.,np.where(e<=.6,1.,(1.-e)/.4))
+    raw='SYNTHETIC ANALYTIC WAVE\nHigh E (V) = 1.2\nLow E (V) = 0\nPotential/V,Current/A\n'
+    raw+='\n'.join(f'{potential:.10f},{-value/1000:.15f}' for potential,value in zip(e,current))
+    wave=Workspace();wave.add_files([('Synthetic-potential-wave-1600rpm.txt',raw.encode())]);wave_id=next(iter(wave.state.traces))
+    wave.state.configs[wave_id].update(potential_method='已是 RHE',area_cm2=.2,area_mode='area',disk_diameter_mm=None)
+    wave.state.settings['plot']['potentials']={'plateau_mode':'manual','plateau_start':.1,'plateau_end':.3,'show_markers':True}
+    wave_project=output/'analytic-wave.orrproj';wave_project.write_bytes(wave.project_bytes())
+    window.request_load(wave_project,discard=True);complete();curve=window.analyses['curves']
+    curve.calculate_button.click();complete();row=w.state.results['curves']['potentials'].iloc[0]
+    assert abs(row.E_onset_V-.992)<1e-10 and abs(row.E_half_V-.8)<1e-10
+    assert curve.potential_table.rowCount()==1
+    curve.request_export('polarization_potentials.csv',recompute=True,path=output/'potential_metrics.csv');complete()
+    import pandas as pd
+    exported=pd.read_csv(output/'potential_metrics.csv');assert abs(exported.E_half_V.iloc[0]-.8)<1e-10
+    assert json.loads(w.state.exports['parameters.json']['bytes'])['analysis_polarization_potentials']['current_source']=='processed_unsmoothed_disk'
+    window.tabs.setCurrentIndex(1);QApplication.processEvents();assert window.grab().save(str(output/'potential_metrics.png'))
     frozen=bool(getattr(sys,'frozen',False));root=Path(sys.executable).resolve().parent
     isolated_paths=all(Path(path).resolve().is_relative_to(root) for path in sys.path) if frozen else None
     if frozen:assert isolated_paths and not any(name=='streamlit' or name.startswith('streamlit.') for name in sys.modules)
-    report=dict(passed=True,full_workflow=True,simple_import=True,real_data_read=False,native_window=True,files=10,invalid_file_isolated=True,
+    report=dict(passed=True,full_workflow=True,simple_import=True,polarization_potentials=True,known_E_onset_V=float(row.E_onset_V),known_E_half_V=float(row.E_half_V),
+        real_data_read=False,native_window=True,files=10,additional_analytic_wave=1,invalid_file_isolated=True,
         manual_rpm=True,batch_pairing=True,manual_segment=True,smoothing_display_only=True,kl_known_n=3.2,rrde_known_n=3.2,
         peroxide_pct=40.,invalid_rrde_preserved=True,ring_comparison=True,csv_png_svg_json_zip=True,schema1_reader=True,
         schema2_roundtrip=True,background_cache_and_conflict=True,cancellation=True,stale_result_discarded=True,

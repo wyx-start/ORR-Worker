@@ -6,6 +6,8 @@
 
 2026-10-28：桌面导入页改为默认摘要与直接绘图，批量常用条件和逐文件／高级设置按需展开；当前候选包输出 `.release/simple-import/`，详见 [更新与验收](tasks/SIMPLIFY_NATIVE_IMPORT.md)。
 
+2026-10-30：桌面极化曲线增加阈值起始／平台半波电位，当前候选包 `.release/potential-metrics/`；使用未平滑处理电流，不影响 K–L／RRDE。算法规则、导出字段与验证见 [电位指标任务记录](tasks/POLARIZATION_POTENTIALS.md)。
+
 Qoder 的两个 UI 文件及三个新测试已集成；Codex 独立复核了 247 项交付基线，并落实 RRDE 默认值、界面精简、批量扫描／背景与转速人工修正。设计见 [任务文档](tasks/SIMPLIFY_RRDE_AND_BATCH_SCAN_BACKGROUND.md)，最终覆盖与限制见 [验证记录](VALIDATION_1.7.0_DEV.md)。本轮由 Codex 统一修改并验收，未向外部代理发送消息。
 
 ## 1. 已确认的需求与边界

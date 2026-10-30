@@ -102,6 +102,7 @@ class DesktopLifecycle:
 
     def collect_project_inputs(self):
         """Use existing numeric task fields; invalid raw text blocks saving."""
+        if self.analyses['curves'].channel.currentData()=='disk':self.analyses['curves'].potential_inputs()
         kl=self.analyses['kl'];values=kl.kl_inputs();values.pop('confirmed',None)
         for key in ('C','D','nu','start','end'):
             value=values.get(key)

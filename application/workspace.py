@@ -303,7 +303,7 @@ class Workspace:
 
     def clear_polarization_exports(self, channel="disk"):
         # Display changes must not invalidate K–L or RRDE calculations.
-        names = (("polarization.png", "polarization.svg", "polarization_data.csv", "polarization_plot.csv", "parameters.json") if channel == "disk"
+        names = (("polarization.png", "polarization.svg", "polarization_data.csv", "polarization_plot.csv", "polarization_potentials.csv", "parameters.json") if channel == "disk"
                  else ("ring_current.png", "ring_current.svg", "ring_current_data.csv", "ring_current_plot.csv", "ring_current_parameters.json"))
         for name in names:
             self.state.exports.pop(name, None)

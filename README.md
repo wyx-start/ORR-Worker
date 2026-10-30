@@ -12,11 +12,13 @@ M0—M7 按阶段验收并同步源码，见 [阶段记录](docs/migration/STAGE
 
 2026-10-28 导入流程进一步简化：默认只显示文件核对表和条件摘要，直接生成极化曲线；批量 pH／参比／背景按需展开，逐文件与高级设置收起。不同条件和旧空值保留，见 [导入页更新与验收](docs/tasks/SIMPLIFY_NATIVE_IMPORT.md)。
 
+2026-10-30 桌面极化曲线新增阈值法起始电位与平台半波电位、逐样品结果、独立指标 CSV 和可选图中标记。使用未平滑处理电流，默认阈值 0.1 mA/cm²；平台不明确或多交点时给出原因，见 [方法与验收](docs/tasks/POLARIZATION_POTENTIALS.md)。
+
 ## 原生候选包运行
 
 完整候选包解压后，双击 **ORR Worker/ORR Worker.exe**；保留整个目录和 `_internal`，不用安装 Python，也不启动浏览器服务。关闭时可保存项目、放弃或取消；保存失败保留窗口。
 
-当前简化导入候选包位于 `.release/simple-import/`，M7 历史包保留在 `.release/M7/`。两者均包含 ZIP、校验值、许可证和指南。**GitHub 的 Code → Download ZIP 是源码，不含这个二进制运行包**；本轮未创建正式 GitHub Release。开发者构建见 [Windows 构建说明](docs/BUILD_WINDOWS.md)，可通过构建器 `--output` 指定新的输出目录。
+当前电位指标候选包位于 `.release/potential-metrics/`，简化导入包与 M7 历史包分别保留在 `.release/simple-import/`、`.release/M7/`。各包均包含 ZIP、校验值、许可证和指南。**GitHub 的 Code → Download ZIP 是源码，不含这个二进制运行包**；本轮未创建正式 GitHub Release。开发者构建见 [Windows 构建说明](docs/BUILD_WINDOWS.md)，可通过构建器 `--output` 指定新的输出目录。
 
 使用步骤见 [原生桌面指南](docs/NATIVE_USER_GUIDE.md)，后续开发见 [桌面架构](docs/NATIVE_ARCHITECTURE.md)。原浏览器入口继续保留，可用于对照与回退。
 
@@ -29,6 +31,7 @@ M0—M7 按阶段验收并同步源码，见 [阶段记录](docs/migration/STAGE
 | 转速识别 | `1600转`、`1600rpm`、`RPM1600`、`转速=1600`；冲突不盲选；未识别值可直接手填，已识别值可修改，人工值优先 |
 | 电位与背景 | 理论 RHE、实测总偏移、已是 RHE、原始坐标；盘环独立背景、不外推；新背景的电位换算、pH、温度与参比默认整组跟随样品 |
 | 曲线 | 盘/环电流切换、跨样品环电流比较、μA/mA、处理后/未扣背景、颜色和坐标设置、仅绘图平滑 |
+| 电位指标（桌面版） | 阈值法起始电位、平台半波电位；自动候选／手动平台，基线、符号、面积和电位轴明确记录；独立 CSV |
 | 盘环配对背景 | 选一个双通道背景自动盘扣盘、环扣环；保留分别指定与旧项目绑定 |
 | K–L | 表观电子数、拟合与逐点结果、2e/4e 两路径模型估算 |
 | RRDE | 过氧化物产率、电子数和两产物模型下的 4e 比例；新文件 N 默认 0.369，可改为实际标定值，旧值保留 |

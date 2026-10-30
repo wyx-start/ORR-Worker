@@ -8,6 +8,8 @@ from orr_core import DataError,json_bytes,parameter_record,potential_signature
 from origin_export import curve_plot_table,csv_bytes
 from plot_smoothing import smooth_for_plot,smoothing_defaults,SMOOTH_DENSITY,SMOOTH_MA
 from ring_comparison import audit_ring_comparison
+from application.potentials import analyze_potentials,potential_options
+import pandas as pd
 
 PALETTE=['#167D8D','#D66A3C','#6956A3','#609A65','#B7486C','#A68138','#416EBA','#777777']
 
@@ -18,6 +20,7 @@ def calculate_curves(workspace,selected,channel='disk',*,commit=True):
     key='curves' if channel=='disk' else 'ring_curves';workspace.state.results.pop(key,None)
     configs,scientific=workspace.pending_candidate();plot_key='plot' if channel=='disk' else 'ring_plot'
     options=deepcopy(scientific.get(plot_key,{}));is_ring=channel=='ring'
+    metric_options=potential_options(options.get('potentials')) if not is_ring else None
     subtract=not is_ring or options.get('background_view','处理后')!='未扣背景'
     outputs,errors=workspace.process_selected(selected,configs,scientific,channels='ring' if is_ring else 'all',subtract_background=subtract)
     if not outputs:raise DataError('没有可处理的曲线。'+'；'.join(e['原因'] for e in errors))
@@ -39,7 +42,7 @@ def calculate_curves(workspace,selected,channel='disk',*,commit=True):
         if lower is not None and upper is not None and lower>=upper:raise DataError('坐标最小值必须小于最大值。')
     width,height=float(options.get('width',8)),float(options.get('height',5));lw=float(options.get('line_width',1.8))
     if not 4<=width<=16 or not 3<=height<=12 or not .5<=lw<=5:raise DataError('请使用有效的图片尺寸和线宽。')
-    colors=options.setdefault('colors',{});plotted={};reports={};fig=new_figure(width,height);ax=fig.subplots()
+    colors=options.setdefault('colors',{});plotted={};reports={};metrics=[];fig=new_figure(width,height);ax=fig.subplots()
     for index,(ident,output) in enumerate(outputs.items()):
         color=colors.get(ident,PALETTE[index%len(PALETTE)])
         if not is_color_like(color):raise DataError(output['name']+'：颜色格式无效。')
@@ -54,6 +57,13 @@ def calculate_curves(workspace,selected,channel='disk',*,commit=True):
             frame['I_ring_corrected_A']=frame['I_ring_A'] if subtract else float('nan')
         plotted[ident]=dict(output,data=frame,plot_channel=channel,plot_smoothing_enabled=enabled)
         ax.plot(frame.E_V,frame[display_col],label=output['config']['name'],color=color,lw=lw)
+        if not is_ring:
+            row=dict(file_id=ident,**analyze_potentials(output,metric_options));metrics.append(row)
+            if metric_options['show_markers']:
+                factor=int(output['config'].get('disk_sign',-1))
+                if density:factor/=float(output['config']['area_cm2'])
+                for metric_key,target,marker in (('E_onset_V','onset_target_mA','o'),('E_half_V','half_target_mA','s')):
+                    if row[metric_key] is not None:ax.plot(row[metric_key],row[target]*factor,marker=marker,color=color,ms=5,linestyle='None')
     ylabel=('Ring I / mA' if unit=='mA' else 'Ring I / μA') if is_ring else ('j / mA cm$^{-2}$' if density else 'I / mA')
     ax.set(xlabel=axis_label(outputs),ylabel=ylabel,title=options.get('title','RRDE ring current comparison' if is_ring else 'ORR polarization curves'))
     ax.set_xlim(left=options.get('xmin'),right=options.get('xmax'));ax.set_ylim(bottom=options.get('ymin'),top=options.get('ymax'))
@@ -62,17 +72,26 @@ def calculate_curves(workspace,selected,channel='disk',*,commit=True):
     if enabled:fig.text(.5,-.01,f"Display only · Savitzky–Golay: {smoothing['window_points']} points, order 2 · gaps retained",ha='center',fontsize=8)
     options.update(smoothing=smoothing,smoothing_report=reports,selected=list(selected))
     if audit:options['comparison_audit']=audit
+    if not is_ring:options['potentials']=metric_options
     scientific[plot_key]=options
     wide=curve_plot_table(plotted)
     result=dict(figure=fig,outputs=outputs,plotted=plotted,errors=errors,plot=wide,channel=channel,
-        smoothing_report=reports,comparison_audit=audit,options=options,revision=workspace.state.revision)
+        smoothing_report=reports,comparison_audit=audit,options=options,revision=workspace.state.revision,
+        potentials=pd.DataFrame(metrics) if not is_ring else None)
     if commit:
         workspace.checkpoint()
         png,svg=figure_bytes(fig);name='ring_current' if is_ring else 'polarization'
         workspace.checkpoint()
+        record=parameter_record(workspace.state.traces,configs,scientific,outputs)
+        if not is_ring:
+            record['analysis_polarization_potentials']={'options':metric_options,'current_source':'processed_unsmoothed_disk',
+                'baseline_policy':'explicit ORR-oriented baseline in mA; default zero',
+                'plateau_quality_rule':'software rule: >=5 contiguous valid points and range/wave-height <=0.10',
+                'results':metrics}
         payloads={name+'_plot.csv':(csv_bytes(wide),'text/csv'),name+'_data.csv':(csv_bytes(merged_data(plotted)),'text/csv'),
             name+'.png':(png,'image/png'),name+'.svg':(svg,'image/svg+xml'),
-            ('ring_current_parameters.json' if is_ring else 'parameters.json'):(json_bytes(parameter_record(workspace.state.traces,configs,scientific,outputs)),'application/json')}
+            ('ring_current_parameters.json' if is_ring else 'parameters.json'):(json_bytes(record),'application/json')}
+        if not is_ring:payloads['polarization_potentials.csv']=(csv_bytes(result['potentials']),'text/csv')
         workspace.apply_pending_settings();workspace.state.settings[plot_key]=options
         result['revision']=workspace.state.revision
         for filename,(payload,mime) in payloads.items():workspace.set_export(filename,payload,mime)

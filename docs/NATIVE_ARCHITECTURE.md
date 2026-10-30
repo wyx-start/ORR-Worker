@@ -23,6 +23,7 @@ orr_core.py 与 background_*.py / settings_draft.py 等纯业务模块
 | `application/workspace.py` | 原始文件、持久化设置、草稿、条件解析、处理、项目与导出状态 |
 | `application/editing.py` | 条件补丁、背景模式及显式复制；浏览器适配层也调用它 |
 | `application/curves.py`、`results.py`、`analysis.py` | 极化／环电流、K–L、RRDE、覆盖预览及结果组织 |
+| `application/potentials.py` | 处理后未平滑盘电流的阈值起始／平台半波、单调支线与交点／平台质量检查 |
 | `application/figures.py`、`data.py` | 无 Qt 的图形构建、PNG／SVG、CSV／ZIP |
 | `application/tasks.py` | 工作区快照、有效性摘要、任务执行与待发布文件 |
 | `desktop/window.py`、`models.py`、`settings.py` | 五页导航、可编辑文件表、条件与扫描／背景设置 |
@@ -42,6 +43,8 @@ orr_core.py 与 background_*.py / settings_draft.py 等纯业务模块
 `follow`、`independent`、`legacy_ph` 保持既有语义。平铺字段始终是独立记录；切换到跟随不回写派生值，也不清空独立缓存。跟随等待或冲突时不能回退缓存。显式“用当前有效条件建立独立记录”才复制条件并记录来源。共享背景关联条件冲突必须指出字段和样品。
 
 新导入的默认是 SCE／饱和 KCl／25 °C、pH 13、5 mm 盘、N=0.369；旧项目人工值、明确空值和历史未知状态不被新默认覆盖。面积单位、rpm 换算、RHE、iR、盘环扣背景和模型判定沿用原核心。平滑只改变显示及对应绘图 CSV，计算保留未平滑电流。
+
+2026-10-30 增加极化曲线起始／半波指标。选项在 `settings.plot.potentials`，结果在 `results.curves.potentials`，新 CSV 参与盘曲线失效清理。使用原始处理结果而非显示平滑列，导出 JSON 保存算法、实际平台与来源快照。平台自动策略是带质量门槛的候选，不是物理平台认证；有歧义留空。详见 [方法与验收](tasks/POLARIZATION_POTENTIALS.md)。
 
 ## 后台与保存
 

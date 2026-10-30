@@ -15,6 +15,7 @@ from application.editing import condition_updates
 from plot_smoothing import PRESET_WINDOWS,smoothing_defaults
 from orr_core import DataError,KOH_PRESET,kl_condition_differences
 from orr_core import json_bytes
+from application.potentials import potential_options
 from desktop.settings import combo,table_from_rows
 
 FIGURE_LABELS={'polarization':'极化曲线','ring_current':'环电流比较','kl_electron_number':'K–L 表观电子数',
@@ -51,6 +52,12 @@ class AnalysisPane(QWidget):
         self.fit_potential.setVisible(kind=='kl');ml.addWidget(self.fit_potential)
         self.details=QGroupBox('处理记录、条件差异与异常点');self.details.setCheckable(True);self.details.setChecked(False)
         dl=QVBoxLayout(self.details);self.table=QTableWidget();self.table.setMaximumHeight(220);dl.addWidget(self.table);self.table.setVisible(False);self.details.toggled.connect(self.table.setVisible);ml.addWidget(self.details)
+        if kind=='curves':
+            self.potential_result=QWidget();pr=QVBoxLayout(self.potential_result);pr.setContentsMargins(0,0,0,0)
+            self.potential_note=QLabel('阈值起始电位与平台半波电位 · 处理后未平滑盘电流；自动平台须核对。');self.potential_note.setWordWrap(True);pr.addWidget(self.potential_note)
+            self.potential_table=QTableWidget();self.potential_table.setMaximumHeight(120);pr.addWidget(self.potential_table)
+            self.potential_csv=QPushButton('保存电位指标 CSV');self.potential_csv.clicked.connect(lambda:window.guard(lambda:self.request_export('polarization_potentials.csv',recompute=True)));pr.addWidget(self.potential_csv)
+            ml.addWidget(self.potential_result);self.potential_result.hide()
         extra=QHBoxLayout();self.extra=QComboBox();extra.addWidget(QLabel('更多导出'));extra.addWidget(self.extra,1)
         button=QPushButton('保存所选文件');button.clicked.connect(lambda:window.guard(self.request_extra));extra.addWidget(button);ml.addLayout(extra);self.extra_button=button
         self._needs_blank=False
@@ -70,6 +77,20 @@ class AnalysisPane(QWidget):
         self.window_points=QSpinBox();self.window_points.setRange(5,1001);self.window_points.setSingleStep(2);self.window_points.setValue(11);self.window_points.valueChanged.connect(self.display_changed);form.addRow('自定义奇数窗口',self.window_points)
         self.unsmoothed=QCheckBox('显示浅色未平滑参考线');self.unsmoothed.setChecked(True);self.unsmoothed.toggled.connect(self.display_changed);form.addRow(self.unsmoothed);left.addWidget(self.smooth_body)
         label=QLabel('平滑不进入 K–L／RRDE；缺口不补齐，不等间距和短段保留原值。');label.setWordWrap(True);left.addWidget(label)
+        self.potential_settings=QGroupBox('起始／半波电位设置');self.potential_settings.setCheckable(True);self.potential_settings.setChecked(False)
+        pl=QVBoxLayout(self.potential_settings);self.potential_body=QWidget();pf=QFormLayout(self.potential_body);pl.addWidget(self.potential_body)
+        self.potential_body.hide();self.potential_settings.toggled.connect(self.potential_body.setVisible)
+        self.onset_threshold=QLineEdit('0.1');pf.addRow('起始电位还原阈值 *',self.onset_threshold)
+        self.onset_unit=combo([('mA/cm²（需盘面积）','mA/cm2'),('mA','mA')]);pf.addRow('阈值单位',self.onset_unit)
+        self.plateau_mode=combo([('自动最低 20% 电位区间（候选）','auto'),('手动指定平台区间','manual')]);pf.addRow('极限平台',self.plateau_mode)
+        self.plateau_start=QLineEdit();self.plateau_end=QLineEdit();pf.addRow('平台起点 / V *',self.plateau_start);pf.addRow('平台终点 / V *',self.plateau_end)
+        self.potential_baseline=QLineEdit('0');pf.addRow('ORR 基线电流 / mA',self.potential_baseline)
+        self.potential_markers=QCheckBox('图中标注：圆点起始、方点半波（未平滑）');pf.addRow(self.potential_markers)
+        note=QLabel('电位按当前坐标；还原方向取正。起始为基线＋阈值，半波为基线到平台的半高。默认基线为 0；未扣净背景时可改基线。平台至少 5 点，电流跨度≤波高 10%；无平台／多交点留空。');note.setWordWrap(True);pf.addRow(note)
+        self.potential_form=pf;left.addWidget(self.potential_settings)
+        for widget in (self.onset_threshold,self.plateau_start,self.plateau_end,self.potential_baseline):widget.editingFinished.connect(self.display_changed)
+        for widget in (self.onset_unit,self.plateau_mode):widget.currentIndexChanged.connect(self.display_changed)
+        self.potential_markers.toggled.connect(self.display_changed)
         style=QGroupBox('图形设置');style.setCheckable(True);style.setChecked(False);sf=QVBoxLayout(style);body=QWidget();form=QFormLayout(body);sf.addWidget(body);body.setVisible(False);style.toggled.connect(body.setVisible)
         self.style_fields={}
         for key,label,default in (('title','图标题','ORR polarization curves'),('line_width','线宽',1.8),('width','宽度 / 英寸',8),('height','高度 / 英寸',5),
@@ -152,6 +173,12 @@ class AnalysisPane(QWidget):
             value=options.get(key,default if key=='title' else {'width':8,'height':5,'line_width':1.8}.get(key));widget.setText('' if value is None else str(value))
         self.legend.setChecked(options.get('legend',True));self.window_points.setEnabled(self.strength.currentText()=='自定义')
         self.smooth_body.setVisible(self.smooth.isChecked());self.smooth_form.setRowVisible(self.window_points,self.strength.currentText()=='自定义')
+        metrics=potential_options(options.get('potentials'))
+        self.onset_threshold.setText(str(metrics['onset_threshold']));self.onset_unit.setCurrentIndex(self.onset_unit.findData(metrics['onset_unit']))
+        self.plateau_mode.setCurrentIndex(self.plateau_mode.findData(metrics['plateau_mode']))
+        for key,widget in (('plateau_start',self.plateau_start),('plateau_end',self.plateau_end),('baseline_mA',self.potential_baseline)):
+            widget.setText('' if metrics[key] is None else str(metrics[key]))
+        self.potential_markers.setChecked(metrics['show_markers']);self.update_potential_fields()
 
     def channel_changed(self,*_):
         if self.loading:return
@@ -229,12 +256,32 @@ class AnalysisPane(QWidget):
         strength=self.strength.currentText();custom=self.window_points.value()
         options['smoothing']=dict(smoothing_defaults(options.get('smoothing')),enabled=self.smooth.isChecked(),preset=strength,
             window_points=PRESET_WINDOWS.get(strength,custom),custom_window=custom,show_unsmoothed=self.unsmoothed.isChecked())
+        if self.channel.currentData()=='disk':options['potentials']=self.potential_inputs()
         return options
+
+    def potential_inputs(self):
+        number=lambda widget:float(widget.text()) if widget.text().strip() else None
+        manual=self.plateau_mode.currentData()=='manual'
+        def bound(widget):
+            if manual:return number(widget)
+            try:
+                value=number(widget);return value if value is None or math.isfinite(value) else None
+            except ValueError:return None # Inactive raw manual input must not block automatic mode.
+        return potential_options(dict(onset_threshold=number(self.onset_threshold),onset_unit=self.onset_unit.currentData(),
+            plateau_mode=self.plateau_mode.currentData(),plateau_start=bound(self.plateau_start),plateau_end=bound(self.plateau_end),
+            baseline_mA=number(self.potential_baseline),show_markers=self.potential_markers.isChecked()))
+
+    def update_potential_fields(self):
+        disk=self.channel.currentData()=='disk';self.potential_settings.setVisible(disk)
+        manual=self.plateau_mode.currentData()=='manual'
+        for widget in (self.plateau_start,self.plateau_end):self.potential_form.setRowVisible(widget,manual)
 
     def display_changed(self,*_):
         if self.loading:return
         self.window.touch_ui()
+        channel=self.channel.currentData();self.w.clear_polarization_exports(channel);self.clear_view()
         try:
+            self.update_potential_fields()
             self.window_points.setEnabled(self.strength.currentText()=='自定义')
             self.smooth_body.setVisible(self.smooth.isChecked());self.smooth_form.setRowVisible(self.window_points,self.strength.currentText()=='自定义')
             self.w.state.settings[self.settings_key()]=self.curve_options()
@@ -318,6 +365,15 @@ class AnalysisPane(QWidget):
         rows=[]
         for ident,o in result['outputs'].items():rows.append({'文件':o['name'],'扫描段':o['segment']['segment'],'方向':o['segment']['direction'],'处理记录':'；'.join(o['notes'])})
         rows.extend(result['errors']);table_from_rows(self.table,rows)
+        if self.kind=='curves':
+            metrics=result.get('potentials');self.potential_result.setVisible(metrics is not None)
+            if metrics is not None:
+                metric_rows=[]
+                for row in metrics.to_dict('records'):
+                    value=lambda key:round(float(row[key]),5) if row[key] is not None and math.isfinite(float(row[key])) else ''
+                    metric_rows.append({'样品':row['sample'],'电位坐标':row['axis'],'E_onset / V':value('E_onset_V'),'E_1/2 / V':value('E_half_V'),
+                        '起始说明':row['onset_reason'],'半波说明':row['half_reason']})
+                table_from_rows(self.potential_table,metric_rows)
 
     def install_figures(self,figures):
         self._needs_blank=False
@@ -332,6 +388,7 @@ class AnalysisPane(QWidget):
 
     def clear_view(self):
         self.saved=None;self.figures={};self.figure_choice.clear();self.table.setRowCount(0)
+        if self.kind=='curves':self.potential_result.hide();self.potential_table.setRowCount(0)
         if getattr(self.window,'jobs',None) and self.window.jobs.busy:
             self._needs_blank=True;self.canvas.hide();return
         figure=new_figure();self.canvas.figure=figure;figure.set_canvas(self.canvas);self.canvas.draw()
@@ -346,6 +403,7 @@ class AnalysisPane(QWidget):
         self.calculate_button.setText(('应用并'+label if self.w.has_draft() else label))
         self.csv_button.setText('应用并导出绘图 CSV' if self.w.has_draft() else '保存绘图 CSV')
         busy=self.window.jobs.busy
+        if self.kind=='curves':self.potential_csv.setEnabled(not busy)
         for button in (self.calculate_button,self.csv_button,self.png_button,self.extra_button):button.setEnabled(not busy)
         if self.kind=='kl':
             custom=self.scheme.currentData()=='custom'
